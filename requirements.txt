@@ -1,6 +1,23 @@
+# 核心Web框架
 streamlit>=1.32.0
+
+# 数据处理
 pandas>=2.1.0
 numpy>=1.24.0
+
+# 可视化
 plotly>=5.17.0
-yfinance>=0.2.31
+
+# A股数据接口
+akshare>=1.10.0
+tushare>=1.2.89
+
+# 时间处理
 pytz>=2023.3
+
+# AI预测模型
+scikit-learn>=1.2.0
+
+# 可选：提升数据处理性能
+openpyxl>=3.1.0
+xlrd>=2.0.1
