@@ -43,7 +43,7 @@ retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[403, 408, 500, 502,
 session.mount("http://", HTTPAdapter(max_retries=retry))
 session.mount("https://", HTTPAdapter(max_retries=retry))
 
-# ===================== 1. 核心数据服务层（可独立封装） =====================
+# ===================== 1. 核心数据服务层（修复接口+网络问题） =====================
 class StockDataService:
     """股票数据服务类 - 统一数据获取接口"""
     def __init__(self, tushare_token=""):
@@ -88,17 +88,30 @@ class StockDataService:
     def get_fundamental_data(_self, stock_code):
         """获取基本面数据（财务+公司概况）"""
         try:
-            # 1. 基础信息
-            stock_info_df = ak.stock_info_a_code_name()
-            stock_name = stock_info_df[stock_info_df['code'] == stock_code]['name'].iloc[0] if not stock_info_df.empty else "未知股票"
+            # 1. 基础信息（改用更稳定的接口）
+            stock_info = ak.stock_individual_info_em(symbol=stock_code)
+            stock_name = stock_info['股票简称'].iloc[0] if not stock_info.empty else "未知股票"
             
-            # 2. 财务指标
-            fina_data = ak.stock_financial_analysis_indicator(stock=stock_code, timeout=10)
-            latest_fina = fina_data.iloc[0] if not fina_data.empty else pd.Series()
+            # 2. 财务指标（增加重试+超时）
+            fina_data = None
+            for _ in range(2):
+                try:
+                    fina_data = ak.stock_financial_analysis_indicator(stock=stock_code, timeout=10)
+                    if not fina_data.empty:
+                        break
+                except:
+                    time.sleep(1)
+            latest_fina = fina_data.iloc[0] if (fina_data is not None and not fina_data.empty) else pd.Series()
             
-            # 3. 行业分类
-            industry_data = ak.stock_industry_sw(stock_code)
-            industry = industry_data['industry_name'].iloc[0] if not industry_data.empty else "未知行业"
+            # 3. 行业分类（修复AKShare接口变更）
+            industry = "未知行业"
+            try:
+                # 新接口名称：stock_industry_classified_em
+                industry_data = ak.stock_industry_classified_em(symbol=stock_code)
+                if not industry_data.empty:
+                    industry = industry_data['所属行业'].iloc[0]
+            except Exception as e:
+                st.warning(f"⚠️ 行业获取失败：{str(e)[:30]}")
             
             # 4. 标准化财务指标
             financial_metrics = {
@@ -123,36 +136,35 @@ class StockDataService:
         except Exception as e:
             st.warning(f"⚠️ 基本面数据获取失败：{str(e)[:50]}")
             return {
-                "basic_info": {"code": stock_code, "name": "未知股票", "industry": "未知行业", "update_time": datetime.now().strftime("%Y-%m-%d %H:%M")},
+                "basic_info": {"code": stock_code, "name": stock_code, "industry": "未知行业", "update_time": datetime.now().strftime("%Y-%m-%d %H:%M")},
                 "financial": {k: "数据更新中" for k in ["营业收入(亿元)", "营收同比增长", "毛利率(%)", "研发费用率(%)", "净利润(亿元)", "净利润同比增长", "资产负债率(%)", "市盈率(TTM)", "市净率", "每股收益(EPS)"]},
                 "status": "failed"
             }
     
     @st.cache_data(ttl=3600)
     def get_industry_analysis(_self, stock_code):
-        """获取行业对比分析数据"""
+        """获取行业对比分析数据（修复接口）"""
         try:
-            # 1. 获取股票所属行业
-            industry_data = ak.stock_industry_sw(stock_code)
+            # 1. 获取股票所属行业（新接口）
+            industry_data = ak.stock_industry_classified_em(symbol=stock_code)
             if industry_data.empty:
-                return {"status": "failed", "data": {}}
+                return {"status": "failed", "industry_name": "未知行业", "data": {}}
             
-            industry = industry_data['industry_name'].iloc[0]
-            industry_code = industry_data['industry_code'].iloc[0]
+            industry = industry_data['所属行业'].iloc[0]
             
-            # 2. 获取同行业股票列表
-            same_industry_stocks = ak.stock_industry_sw_cons(industry_code)
+            # 2. 获取同行业股票列表（新接口）
+            same_industry_stocks = ak.stock_industry_classified_em(industry=industry)
             if same_industry_stocks.empty:
-                return {"status": "failed", "data": {}}
+                return {"status": "failed", "industry_name": industry, "data": {}}
             
-            # 3. 筛选龙头股（市值前5）
+            # 3. 筛选龙头股（取前5）
             top_stocks = same_industry_stocks.head(5)
             industry_compare = {}
             
             for _, row in top_stocks.iterrows():
                 try:
-                    code = row['symbol']
-                    name = row['name']
+                    code = row['代码']
+                    name = row['名称']
                     fina_data = ak.stock_financial_analysis_indicator(stock=code, timeout=5)
                     latest = fina_data.iloc[0] if not fina_data.empty else pd.Series()
                     
@@ -161,7 +173,7 @@ class StockDataService:
                         "毛利率(%)": _self._format_metric(latest, "销售毛利率", lambda x: round(x*100, 2)),
                         "市盈率(TTM)": _self._format_metric(latest, "市盈率TTM", lambda x: round(x, 2)),
                         "营收同比增长": _self._format_metric(latest, "营业总收入同比增长率", lambda x: f"{x:.2f}%"),
-                        "总市值(亿元)": round(row['market_cap']/1e8, 2) if 'market_cap' in row else "N/A"
+                        "总市值(亿元)": "N/A"  # 简化处理，避免额外接口依赖
                     }
                 except:
                     continue
@@ -312,7 +324,7 @@ class StockAIPredictor:
         except Exception as e:
             return None, f"预测失败：{str(e)[:50]}"
 
-# ===================== 3. 页面UI层 =====================
+# ===================== 3. 页面UI层（修复NameError） =====================
 class StockAnalysisUI:
     """页面UI渲染类"""
     def __init__(self, data_service, ai_predictor):
@@ -414,7 +426,9 @@ class StockAnalysisUI:
         ])
         
         with tab1:
-            self._render_price_chart(df, config, prediction_result)
+            # 修复NameError：使用默认名称兜底
+            stock_name = fundamental_data['basic_info']['name'] or config["stock_code"]
+            self._render_price_chart(df, config, prediction_result, stock_name)
         
         with tab2:
             self._render_technical_analysis(df)
@@ -431,8 +445,8 @@ class StockAnalysisUI:
         # 页脚
         self._render_footer()
     
-    def _render_price_chart(self, df, config, prediction_result):
-        """渲染股价走势图"""
+    def _render_price_chart(self, df, config, prediction_result, stock_name):
+        """渲染股价走势图（修复NameError）"""
         fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.6, 0.2, 0.2])
         
         # K线图
@@ -479,9 +493,9 @@ class StockAnalysisUI:
         fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
         
-        # 图表样式
+        # 图表样式（修复NameError）
         fig.update_layout(
-            height=800, title=f"{fundamental_data['basic_info']['name']} ({config['stock_code']}) 股价走势",
+            height=800, title=f"{stock_name} ({config['stock_code']}) 股价走势",
             title_x=0.5, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
             plot_bgcolor="white", xaxis_rangeslider_visible=False
         )
