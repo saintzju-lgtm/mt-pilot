@@ -7,7 +7,7 @@ import datetime
 import time
 
 # --- 页面配置 ---
-st.set_page_config(layout="wide", page_title="AI 智投雷达 (双核版)", page_icon="📡")
+st.set_page_config(layout="wide", page_title="AI 智投雷达 (修复版)", page_icon="📡")
 
 # --- CSS 样式优化 ---
 st.markdown("""
@@ -18,72 +18,94 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 0. 核心配置 (现在可以随意混用行业和概念名称了) ---
+# --- 0. 核心配置 ---
 THEME_MAP = {
     "算力/CPO (概念)": "CPO概念",
     "人工智能 (概念)": "人工智能",
-    "半导体 (行业)": "半导体",        # <--- 这里直接用行业名称“半导体”
+    "半导体 (行业)": "半导体",        
     "存储芯片 (概念)": "存储芯片",
-    "PCB (行业)": "印制电路板",       # <--- PCB在行业里叫“印制电路板”
+    "PCB (行业)": "印制电路板",       
     "英伟达概念": "英伟达概念",
     "消费电子 (行业)": "消费电子",
     "机器人 (概念)": "机器人概念"
 }
 
-# --- 1. 数据获取模块 (双核驱动：概念+行业) ---
+# --- 1. 数据获取模块 (含市值补全补丁) ---
+
+@st.cache_data(ttl=600)
+def fetch_all_market_caps():
+    """
+    【救生圈函数】获取全市场所有股票的市值，用于补全缺失数据
+    """
+    try:
+        # 获取全市场实时行情 (只取代码和总市值)
+        df = ak.stock_zh_a_spot_em()
+        df = df[['代码', '总市值']].copy()
+        df.rename(columns={'代码': 'code', '总市值': 'mkt_cap_patch'}, inplace=True)
+        # 转换为数值
+        df['mkt_cap_patch'] = pd.to_numeric(df['mkt_cap_patch'], errors='coerce').fillna(0)
+        return df
+    except:
+        return pd.DataFrame()
 
 @st.cache_data(ttl=600)
 def get_stock_list_smart(symbol_name):
     """
-    智能获取成分股：先试概念接口，再试行业接口
+    智能获取成分股：双核驱动 + 自动补全市值
     """
     df = pd.DataFrame()
-    source_type = ""
-
-    # 通用清洗函数
+    
     def clean_data(raw_df):
         if raw_df.empty: return pd.DataFrame()
-        # 列名映射
+        
         rename_map = {
             '代码': 'code', '名称': 'name', '最新价': 'price', 
             '涨跌幅': 'pct_chg', '成交量': 'volume', '成交额': 'amount',
             '总市值': 'mkt_cap', '总市值(元)': 'mkt_cap', '流通市值': 'mkt_cap' 
         }
         raw_df.rename(columns=rename_map, inplace=True)
-        # 补全缺失列
+        
         required_cols = ['code', 'name', 'price', 'pct_chg', 'volume', 'mkt_cap']
         for col in required_cols:
-            if col not in raw_df.columns: raw_df[col] = 0
-        # 类型转换
+            if col not in raw_df.columns: 
+                raw_df[col] = 0 
+                
         final_df = raw_df[required_cols].copy()
         for col in ['price', 'pct_chg', 'mkt_cap', 'volume']:
             final_df[col] = pd.to_numeric(final_df[col], errors='coerce').fillna(0)
+            
         return final_df
 
-    # --- 尝试 1: 概念接口 ---
+    # 1. 尝试获取列表 (概念或行业)
     try:
+        # 先试概念
         df = ak.stock_board_concept_cons_em(symbol=symbol_name)
         df = clean_data(df)
-        if not df.empty:
-            source_type = "概念"
-            print(f"DEBUG: [{symbol_name}] 从概念接口获取成功")
-            return df
     except:
-        pass # 失败不要紧，继续尝试行业接口
+        try:
+            # 再试行业
+            df = ak.stock_board_industry_cons_em(symbol=symbol_name)
+            df = clean_data(df)
+        except:
+            return pd.DataFrame()
 
-    # --- 尝试 2: 行业接口 ---
-    try:
-        # 注意：行业接口名字不同
-        df = ak.stock_board_industry_cons_em(symbol=symbol_name)
-        df = clean_data(df)
-        if not df.empty:
-            source_type = "行业"
-            print(f"DEBUG: [{symbol_name}] 从行业接口获取成功")
-            return df
-    except Exception as e:
-        print(f"DEBUG: [{symbol_name}] 行业接口也失败: {e}")
+    if df.empty: return pd.DataFrame()
 
-    return pd.DataFrame()
+    # --- 【关键修复】市值补全逻辑 ---
+    # 如果总市值之和为0，说明接口没返回市值，需要去全市场表里查
+    if df['mkt_cap'].sum() == 0:
+        # print("DEBUG: 检测到市值缺失，正在执行补全...")
+        patch_df = fetch_all_market_caps()
+        
+        if not patch_df.empty:
+            # 将补全表合并进来
+            df = pd.merge(df, patch_df, on='code', how='left')
+            # 用补全的市值覆盖原来的0
+            df['mkt_cap'] = df['mkt_cap_patch'].fillna(0)
+            # 删除临时列
+            df.drop(columns=['mkt_cap_patch'], inplace=True)
+            
+    return df
 
 @st.cache_data(ttl=3600)
 def get_hist_data(code):
@@ -105,13 +127,11 @@ def generate_trading_plan(df, current_price):
     if df.empty or len(df) < 20: return None
     data = df.copy()
     
-    # 指标计算
     data['MA20'] = data['close'].rolling(window=20).mean()
     data['std'] = data['close'].rolling(window=20).std()
     data['Upper'] = data['MA20'] + (data['std'] * 2)
     data['Lower'] = data['MA20'] - (data['std'] * 2)
     
-    # ATR
     data['tr'] = np.maximum((data['high'] - data['low']), 
                             np.maximum(abs(data['high'] - data['close'].shift(1)), 
                                        abs(data['low'] - data['close'].shift(1))))
@@ -119,7 +139,6 @@ def generate_trading_plan(df, current_price):
     
     last = data.iloc[-1]
     
-    # 策略逻辑
     support = max(last['Lower'], data['low'].tail(20).min())
     resistance = min(last['Upper'], data['high'].tail(20).max())
     
@@ -127,8 +146,7 @@ def generate_trading_plan(df, current_price):
     take_profit = resistance * 0.99
     stop_loss = buy_entry - (1.5 * atr)
     
-    # 状态判定
-    status = "watch" # 默认观望
+    status = "watch"
     status_label = "⚪ 观望"
     
     if current_price <= buy_entry * 1.02: 
@@ -160,18 +178,21 @@ real_name = THEME_MAP[selected_theme_label]
 
 st.title(f"📊 板块透视：{selected_theme_label}")
 
-# 步骤 1: 获取名单 (调用智能双核接口)
-with st.spinner(f"正在全网搜索 {real_name} 数据 (双通道)..."):
+# 步骤 1: 获取名单
+with st.spinner(f"正在全网搜索 {real_name} 数据..."):
     df_all = get_stock_list_smart(real_name)
 
 if not df_all.empty:
     # 过滤器
-    min_mkt_cap = st.sidebar.slider("2. 最小市值过滤 (亿)", 0, 500, 30)
+    min_mkt_cap = st.sidebar.slider("2. 最小市值过滤 (亿)", 0, 500, 50)
     
+    # --- 修复后的过滤逻辑 ---
+    # 检查补全后是否还有数据
     if df_all['mkt_cap'].sum() == 0:
-        st.sidebar.warning("⚠️ 数据源未返回市值，显示全部")
+        st.sidebar.error("⚠️ 严重错误：无法获取市值数据，过滤失效。")
         df_filtered = df_all
     else:
+        # 正常过滤
         df_filtered = df_all[df_all['mkt_cap'] > (min_mkt_cap * 100000000)].copy()
     
     df_filtered = df_filtered.sort_values(by='pct_chg', ascending=False)
@@ -187,15 +208,14 @@ if not df_all.empty:
     if st.session_state.last_sector != real_name:
         st.session_state.scan_results = None
         st.session_state.last_sector = real_name
+        # 如果切换板块且之前的筛选结果还在，强制刷新一下Session状态里的筛选结果
+        st.rerun()
 
     col_btn, col_info = st.columns([1, 4])
     start_scan = col_btn.button("🚀 开始 AI 深度分类", type="primary")
     
-    # 扫描逻辑
     if start_scan:
         scan_data = {"buy": [], "sell": [], "watch": []}
-        
-        # 演示只扫前40只
         scan_list = df_filtered.head(40) 
         
         progress_bar = st.progress(0)
@@ -279,7 +299,6 @@ if not df_all.empty:
             if not hist_df.empty:
                 plan = generate_trading_plan(hist_df, curr_price)
                 if plan:
-                    # 画图
                     fig = go.Figure()
                     fig.add_trace(go.Candlestick(x=hist_df.index,
                                     open=hist_df['open'], high=hist_df['high'],
@@ -298,4 +317,4 @@ if not df_all.empty:
                     st.plotly_chart(fig, use_container_width=True)
 
 else:
-    st.error(f"无法获取板块 [{real_name}] 数据。请检查该名称在东方财富是否属于【行业】或【概念】板块。")
+    st.error(f"无法获取板块 [{real_name}] 数据。")
