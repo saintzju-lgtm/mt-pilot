@@ -4,39 +4,71 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 import datetime
+import time
 
 # --- 页面配置 ---
 st.set_page_config(layout="wide", page_title="AI 核心资产操盘手", page_icon="🤖")
 
-# --- 0. 核心配置：AI 赛道优选池 (Hardcoded for Precision) ---
-# 为了确保相关性，我们手动维护一份核心 AI 股票列表
-# 包括：CPO(算力), 大模型, 半导体, PCB
+# --- 0. 核心配置：AI 赛道优选池 (手动配置名称，避免全市场下载超时) ---
+# 格式: {"板块名": {"代码": "名称", ...}}
 AI_STOCKS_POOL = {
-    "算力/CPO": ["300308", "300502", "601138", "000977", "300394"], # 中际旭创, 新易盛, 工业富联, 浪潮信息, 天孚通信
-    "大模型/应用": ["002230", "300418", "601360", "002261", "300002"], # 科大讯飞, 昆仑万维, 三六零, 拓维信息, 神州泰岳
-    "半导体/芯片": ["688256", "688041", "603501", "600584", "002371"]  # 寒武纪, 海光信息, 韦尔股份, 长电科技, 北方华创
+    "算力/CPO": {
+        "300308": "中际旭创", "300502": "新易盛", "601138": "工业富联", 
+        "000977": "浪潮信息", "300394": "天孚通信"
+    },
+    "大模型/应用": {
+        "002230": "科大讯飞", "300418": "昆仑万维", "601360": "三六零", 
+        "002261": "拓维信息", "300002": "神州泰岳"
+    },
+    "半导体/芯片": {
+        "688256": "寒武纪", "688041": "海光信息", "603501": "韦尔股份", 
+        "600584": "长电科技", "002371": "北方华创"
+    }
 }
 
-# 扁平化列表用于查询
-ALL_AI_CODES = [code for category in AI_STOCKS_POOL.values() for code in category]
+# --- 1. 数据获取模块 (修复版：只获取特定股票，防止超时) ---
 
-# --- 1. 数据获取模块 (修复股价不对的问题) ---
-
-@st.cache_data(ttl=60) # 实时行情缓存 60秒
-def get_realtime_prices(code_list):
+@st.cache_data(ttl=300) # 缓存5分钟，避免频繁请求
+def get_specific_stocks_data(stock_dict):
     """
-    获取一篮子股票的实时最新价格
+    循环获取特定股票的最新数据，替代全市场扫描，防止 ReadTimeout
     """
-    # 获取全市场实时行情
-    df_spot = ak.stock_zh_a_spot_em()
-    # 筛选出我们的 AI 股票
-    df_ai = df_spot[df_spot['代码'].isin(code_list)].copy()
+    data_list = []
     
-    # 整理格式
-    df_ai = df_ai[['代码', '名称', '最新价', '涨跌幅', '成交量', '换手率', '总市值']]
-    df_ai.rename(columns={'代码': 'code', '名称': 'name', '最新价': 'price', 
-                          '涨跌幅': 'pct_chg', '成交量': 'volume', '总市值': 'mkt_cap'}, inplace=True)
-    return df_ai
+    # 进度条（为了提升用户体验）
+    progress_bar = st.progress(0)
+    total = len(stock_dict)
+    
+    for i, (code, name) in enumerate(stock_dict.items()):
+        progress_bar.progress((i + 1) / total)
+        try:
+            # 获取最近 5 天的数据（只需要最后一行作为最新价）
+            # 使用 qfq (前复权)
+            df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date="20240101", adjust="qfq")
+            
+            if not df.empty:
+                last_row = df.iloc[-1]
+                prev_row = df.iloc[-2] if len(df) > 1 else last_row
+                
+                # 计算涨跌幅
+                price = last_row['收盘']
+                prev_close = prev_row['收盘']
+                pct_chg = ((price - prev_close) / prev_close) * 100
+                
+                data_list.append({
+                    "code": code,
+                    "name": name,
+                    "price": price,
+                    "pct_chg": pct_chg,
+                    "volume": last_row['成交量'],
+                    "mkt_cap": 0  # 个股接口很难直接获取实时市值，这里暂时置0或忽略
+                })
+        except Exception as e:
+            # 某只股票失败不影响整体
+            continue
+            
+    progress_bar.empty() # 清除进度条
+    return pd.DataFrame(data_list)
 
 @st.cache_data(ttl=3600) # 历史K线缓存 1小时
 def get_hist_data(code):
@@ -46,7 +78,6 @@ def get_hist_data(code):
     end_date = datetime.datetime.now().strftime("%Y%m%d")
     start_date = (datetime.datetime.now() - datetime.timedelta(days=180)).strftime("%Y%m%d")
     
-    # 使用前复权 (qfq) 确保技术指标计算准确
     try:
         df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
         df.rename(columns={'日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low', '成交量': 'volume'}, inplace=True)
@@ -58,9 +89,6 @@ def get_hist_data(code):
 
 # --- 2. 核心算法：生成实战建议 ---
 def generate_trading_plan(df, current_price):
-    """
-    根据布林带和波动率，计算具体的买卖点位
-    """
     if df.empty:
         return None
 
@@ -81,22 +109,13 @@ def generate_trading_plan(df, current_price):
     last_row = data.iloc[-1]
     
     # === 策略逻辑 ===
-    # 支撑位 (Support): 布林带下轨 或 近20日低点
     support_level = max(last_row['Lower'], data['low'].tail(20).min())
-    
-    # 压力位 (Resistance): 布林带上轨 或 近20日高点
     resistance_level = min(last_row['Upper'], data['high'].tail(20).max())
     
-    # 建议买入价: 支撑位上方一点点 (挂单技巧)
     buy_entry = support_level * 1.01
-    
-    # 建议止盈价: 压力位下方一点点
     take_profit = resistance_level * 0.99
-    
-    # 建议止损价: 买入价 - 1.5倍 ATR
     stop_loss = buy_entry - (1.5 * atr)
     
-    # 趋势判定
     trend = "震荡"
     if current_price > last_row['MA20']:
         trend = "多头趋势 (MA20上方)"
@@ -117,15 +136,15 @@ def generate_trading_plan(df, current_price):
 
 # 侧边栏：板块选择
 st.sidebar.title("🔥 AI 赛道扫描")
-sector = st.sidebar.radio("选择细分领域:", list(AI_STOCKS_POOL.keys()))
-selected_pool = AI_STOCKS_POOL[sector]
+sector_name = st.sidebar.radio("选择细分领域:", list(AI_STOCKS_POOL.keys()))
+selected_pool_dict = AI_STOCKS_POOL[sector_name] # 获取该板块的 {code: name} 字典
 
-st.title(f"🚀 AI 核心资产分析：{sector}")
-st.markdown(f"当前板块共追踪 **{len(selected_pool)}** 只龙头标的，数据实时更新。")
+st.title(f"🚀 AI 核心资产分析：{sector_name}")
+st.markdown(f"当前追踪 **{len(selected_pool_dict)}** 只龙头标的 (已优化云端连接稳定性)。")
 
 # 获取实时数据
-with st.spinner("正在连接交易所实时行情..."):
-    realtime_df = get_realtime_prices(selected_pool)
+with st.spinner("正在获取最新行情数据..."):
+    realtime_df = get_specific_stocks_data(selected_pool_dict)
 
 if not realtime_df.empty:
     # 按照涨跌幅排序
@@ -140,7 +159,6 @@ if not realtime_df.empty:
             "price": st.column_config.NumberColumn("现价", format="¥%.2f"),
             "pct_chg": st.column_config.NumberColumn("涨跌幅", format="%.2f%%", help="今日实时涨跌"),
             "volume": st.column_config.NumberColumn("成交量(手)"),
-            "mkt_cap": st.column_config.NumberColumn("总市值(亿)", format="%.1f")
         },
         hide_index=True,
         use_container_width=True
@@ -151,7 +169,6 @@ if not realtime_df.empty:
     # 2. 个股深度实战分析
     st.subheader("💡 个股实战决策终端")
     
-    # 制作一个选项列表: "代码 | 名称"
     select_options = [f"{row['code']} | {row['name']}" for _, row in realtime_df.iterrows()]
     selected_option = st.selectbox("请选择要分析的股票:", select_options)
     
@@ -174,11 +191,8 @@ if not realtime_df.empty:
             
             # 第一行：现价与趋势
             c1, c2, c3 = st.columns(3)
-            c1.metric("当前价格", f"¥{curr_price}", f"{current_info['pct_chg']}%")
+            c1.metric("当前价格", f"¥{curr_price}", f"{current_info['pct_chg']:.2f}%")
             c2.metric("短期趋势", plan['trend'])
-            
-            # 计算现价距离买点和卖点的距离
-            dist_to_buy = (curr_price - plan['buy_entry']) / curr_price
             
             status_html = ""
             if curr_price < plan['buy_entry'] * 1.02:
@@ -192,7 +206,7 @@ if not realtime_df.empty:
             
             st.markdown("---")
             
-            # 第二行：具体的三个价格点位 (核心功能)
+            # 第二行：具体的三个价格点位
             k1, k2, k3 = st.columns(3)
             
             k1.success(f"💰 建议买入价\n\n# **¥{plan['buy_entry']:.2f}**\n(支撑位附近)")
@@ -221,7 +235,7 @@ if not realtime_df.empty:
             fig.update_layout(xaxis_rangeslider_visible=False, height=500, title="布林带交易通道")
             st.plotly_chart(fig, use_container_width=True)
             
-            st.caption(f"注：止损位基于 ATR 波动率计算 ({plan['stop_loss']:.2f})。以上建议仅基于技术指标，不构成投资建议。")
+            st.caption(f"注：止损位基于 ATR 波动率计算 ({plan['stop_loss']:.2f})。")
 
 else:
-    st.error("无法获取数据，请检查网络连接。")
+    st.error("数据获取失败。这可能是因为 Streamlit Cloud IP 被临时限制，请稍后刷新重试。")
