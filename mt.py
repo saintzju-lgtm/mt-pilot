@@ -7,9 +7,9 @@ import datetime
 import time
 
 # --- 页面配置 ---
-st.set_page_config(layout="wide", page_title="AI 智投雷达 (自动分类版)", page_icon="📡")
+st.set_page_config(layout="wide", page_title="AI 智投雷达 (终极版)", page_icon="📡")
 
-# --- CSS 优化 ---
+# --- CSS 样式优化 ---
 st.markdown("""
 <style>
     .stTabs [data-baseweb="tab-list"] { gap: 10px; }
@@ -31,29 +31,42 @@ THEME_MAP = {
     "机器人": "机器人概念"
 }
 
-# --- 1. 数据获取模块 ---
+# --- 1. 数据获取模块 (高强度防崩版) ---
 
 @st.cache_data(ttl=600)
 def get_concept_stocks(concept_name):
-    """获取板块成分股"""
+    """获取板块成分股 (含列名清洗与容错)"""
     try:
+        # 获取原始数据
         df = ak.stock_board_concept_cons_em(symbol=concept_name)
+        
+        # 1. 打印列名以便后台调试 (如果还出错，请看控制台输出)
+        print(f"DEBUG: 板块[{concept_name}] 返回列名: {df.columns.tolist()}")
+
+        # 2. 建立列名映射 (兼容多种可能)
         rename_map = {
             '代码': 'code', '名称': 'name', '最新价': 'price', 
             '涨跌幅': 'pct_chg', '成交量': 'volume', '成交额': 'amount',
             '总市值': 'mkt_cap', '总市值(元)': 'mkt_cap', '流通市值': 'mkt_cap' 
         }
         df.rename(columns=rename_map, inplace=True)
+        
+        # 3. 强制补全缺失列 (这是防止报错的关键!)
         required_cols = ['code', 'name', 'price', 'pct_chg', 'volume', 'mkt_cap']
         for col in required_cols:
-            if col not in df.columns: df[col] = 0 
+            if col not in df.columns:
+                df[col] = 0  # 缺什么补什么，默认补0
         
+        # 4. 只保留需要的列
         df = df[required_cols]
+        
+        # 5. 类型转换
         for col in ['price', 'pct_chg', 'mkt_cap', 'volume']:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+            
         return df
     except Exception as e:
-        print(f"List Error: {e}")
+        print(f"List Error: {e}") # 打印错误到后台
         return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
@@ -101,7 +114,9 @@ def generate_trading_plan(df, current_price):
     # 状态判定
     status = "watch" # 默认观望
     status_label = "⚪ 观望"
-    if current_price <= buy_entry * 1.02: # 放宽一点点判定范围
+    
+    # 放宽 2% 的判定范围，更容易捕捉信号
+    if current_price <= buy_entry * 1.02: 
         status = "buy"
         status_label = "🟢 机会 (低吸)"
     elif current_price >= take_profit * 0.98:
@@ -138,8 +153,9 @@ if not df_all.empty:
     # 过滤器
     min_mkt_cap = st.sidebar.slider("2. 最小市值过滤 (亿)", 0, 500, 30)
     
+    # 如果市值数据缺失 (全是0)，则不做过滤
     if df_all['mkt_cap'].sum() == 0:
-        st.sidebar.warning("⚠️ 市值数据缺失，显示全部")
+        st.sidebar.warning("⚠️ 注意：数据源未返回市值数据，过滤功能已自动暂停，显示全部股票。")
         df_filtered = df_all
     else:
         df_filtered = df_all[df_all['mkt_cap'] > (min_mkt_cap * 100000000)].copy()
@@ -150,7 +166,7 @@ if not df_all.empty:
     
     # --- 核心功能：批量扫描 ---
     
-    # 使用 Session State 保存扫描结果，防止刷新丢失
+    # 使用 Session State 保存扫描结果
     if 'scan_results' not in st.session_state:
         st.session_state.scan_results = None
         st.session_state.last_sector = None
@@ -167,8 +183,7 @@ if not df_all.empty:
     if start_scan:
         scan_data = {"buy": [], "sell": [], "watch": []}
         
-        # 限制最大扫描数量，防止等待太久 (例如取前30只龙头)
-        # 如果你想全扫，可以去掉这个切片，但会很慢
+        # 为了演示速度，限制扫描前 40 只龙头 (想扫描全部请去掉 .head(40))
         scan_list = df_filtered.head(40) 
         
         progress_bar = st.progress(0)
@@ -178,7 +193,7 @@ if not df_all.empty:
         for i, (index, row) in enumerate(scan_list.iterrows()):
             # 更新进度
             progress_bar.progress((i + 1) / total)
-            status_text.text(f"正在分析: {row['name']} ({i+1}/{total})...")
+            status_text.text(f"正在 AI 分析: {row['name']}...")
             
             # 获取历史并计算
             hist = get_hist_data(row['code'])
@@ -221,7 +236,6 @@ if not df_all.empty:
                 st.info("当前分类下暂无股票。")
                 return
             
-            # 转为 DataFrame 展示
             df_res = pd.DataFrame(stock_list)
             
             # 配置列显示
@@ -231,8 +245,8 @@ if not df_all.empty:
                     "code": "代码", "name": "名称",
                     "price": st.column_config.NumberColumn("现价", format="¥%.2f"),
                     "pct": st.column_config.NumberColumn("今日涨幅", format="%.2f%%"),
-                    "buy": st.column_config.NumberColumn("支撑位(买)", format="¥%.2f"),
-                    "sell": st.column_config.NumberColumn("压力位(卖)", format="¥%.2f"),
+                    "buy": st.column_config.NumberColumn("支撑位(买)", format="¥%.2f", help="布林带下轨附近"),
+                    "sell": st.column_config.NumberColumn("压力位(卖)", format="¥%.2f", help="布林带上轨附近"),
                     "trend": "趋势"
                 },
                 hide_index=True,
@@ -253,14 +267,13 @@ if not df_all.empty:
             
         st.markdown("---")
 
-    # --- 3. 个股详情 (保留，用于Deep Dive) ---
-    st.subheader("🔎 个股深度透视")
+    # --- 3. 个股详情 (Deep Dive) ---
+    st.subheader("🔎 个股走势验证")
     if len(df_filtered) > 0:
-        # 默认选中第一个“低吸”的股票，如果没有则选第一个
         default_idx = 0
         stock_options = [f"{row['code']} | {row['name']}" for _, row in df_filtered.iterrows()]
         
-        selected_stock = st.selectbox("选择股票查看走势图:", stock_options, index=default_idx)
+        selected_stock = st.selectbox("选择股票查看详情:", stock_options, index=default_idx)
         
         if selected_stock:
             code = selected_stock.split(" | ")[0]
@@ -290,4 +303,4 @@ if not df_all.empty:
                     st.plotly_chart(fig, use_container_width=True)
 
 else:
-    st.error("无法获取板块数据，请稍后重试。")
+    st.error("无法获取板块数据，可能是接口繁忙，请稍后重试。")
