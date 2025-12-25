@@ -7,7 +7,7 @@ import datetime
 import time
 
 # --- 页面配置 ---
-st.set_page_config(layout="wide", page_title="AI 智投雷达 (终极版)", page_icon="📡")
+st.set_page_config(layout="wide", page_title="AI 智投雷达 (双核版)", page_icon="📡")
 
 # --- CSS 样式优化 ---
 st.markdown("""
@@ -18,58 +18,72 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# --- 0. 核心配置 ---
-# 键：显示在界面上的名字
-# 值：东方财富实际的板块名称 (已修正接口名称，防止报错)
+# --- 0. 核心配置 (现在可以随意混用行业和概念名称了) ---
 THEME_MAP = {
-    "算力/CPO (核心硬件)": "CPO概念",
-    "人工智能 (大模型)": "人工智能",
-    "半导体 (芯片制造)": "芯片概念",   # <--- 已修复：使用'芯片概念'替代'半导体'
-    "PCB (印制电路板)": "PCB",
+    "算力/CPO (概念)": "CPO概念",
+    "人工智能 (概念)": "人工智能",
+    "半导体 (行业)": "半导体",        # <--- 这里直接用行业名称“半导体”
+    "存储芯片 (概念)": "存储芯片",
+    "PCB (行业)": "印制电路板",       # <--- PCB在行业里叫“印制电路板”
     "英伟达概念": "英伟达概念",
-    "存储芯片": "存储芯片",
-    "多模态AI": "多模态AI",
-    "消费电子": "消费电子",
-    "机器人": "机器人概念"
+    "消费电子 (行业)": "消费电子",
+    "机器人 (概念)": "机器人概念"
 }
 
-# --- 1. 数据获取模块 (高强度防崩版) ---
+# --- 1. 数据获取模块 (双核驱动：概念+行业) ---
 
 @st.cache_data(ttl=600)
-def get_concept_stocks(concept_name):
-    """获取板块成分股 (含列名清洗与容错)"""
-    try:
-        # 获取原始数据
-        df = ak.stock_board_concept_cons_em(symbol=concept_name)
-        
-        # 1. 打印列名以便后台调试 (如果还出错，请看控制台输出)
-        print(f"DEBUG: 板块[{concept_name}] 返回列名: {df.columns.tolist()}")
+def get_stock_list_smart(symbol_name):
+    """
+    智能获取成分股：先试概念接口，再试行业接口
+    """
+    df = pd.DataFrame()
+    source_type = ""
 
-        # 2. 建立列名映射 (兼容多种可能)
+    # 通用清洗函数
+    def clean_data(raw_df):
+        if raw_df.empty: return pd.DataFrame()
+        # 列名映射
         rename_map = {
             '代码': 'code', '名称': 'name', '最新价': 'price', 
             '涨跌幅': 'pct_chg', '成交量': 'volume', '成交额': 'amount',
             '总市值': 'mkt_cap', '总市值(元)': 'mkt_cap', '流通市值': 'mkt_cap' 
         }
-        df.rename(columns=rename_map, inplace=True)
-        
-        # 3. 强制补全缺失列 (这是防止报错的关键!)
+        raw_df.rename(columns=rename_map, inplace=True)
+        # 补全缺失列
         required_cols = ['code', 'name', 'price', 'pct_chg', 'volume', 'mkt_cap']
         for col in required_cols:
-            if col not in df.columns:
-                df[col] = 0  # 缺什么补什么，默认补0
-        
-        # 4. 只保留需要的列
-        df = df[required_cols]
-        
-        # 5. 类型转换
+            if col not in raw_df.columns: raw_df[col] = 0
+        # 类型转换
+        final_df = raw_df[required_cols].copy()
         for col in ['price', 'pct_chg', 'mkt_cap', 'volume']:
-            df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
-            
-        return df
+            final_df[col] = pd.to_numeric(final_df[col], errors='coerce').fillna(0)
+        return final_df
+
+    # --- 尝试 1: 概念接口 ---
+    try:
+        df = ak.stock_board_concept_cons_em(symbol=symbol_name)
+        df = clean_data(df)
+        if not df.empty:
+            source_type = "概念"
+            print(f"DEBUG: [{symbol_name}] 从概念接口获取成功")
+            return df
+    except:
+        pass # 失败不要紧，继续尝试行业接口
+
+    # --- 尝试 2: 行业接口 ---
+    try:
+        # 注意：行业接口名字不同
+        df = ak.stock_board_industry_cons_em(symbol=symbol_name)
+        df = clean_data(df)
+        if not df.empty:
+            source_type = "行业"
+            print(f"DEBUG: [{symbol_name}] 从行业接口获取成功")
+            return df
     except Exception as e:
-        print(f"List Error: {e}") # 打印错误到后台
-        return pd.DataFrame()
+        print(f"DEBUG: [{symbol_name}] 行业接口也失败: {e}")
+
+    return pd.DataFrame()
 
 @st.cache_data(ttl=3600)
 def get_hist_data(code):
@@ -117,7 +131,6 @@ def generate_trading_plan(df, current_price):
     status = "watch" # 默认观望
     status_label = "⚪ 观望"
     
-    # 放宽 2% 的判定范围，更容易捕捉信号
     if current_price <= buy_entry * 1.02: 
         status = "buy"
         status_label = "🟢 机会 (低吸)"
@@ -143,21 +156,20 @@ def generate_trading_plan(df, current_price):
 
 st.sidebar.title("📡 AI 智投雷达")
 selected_theme_label = st.sidebar.radio("1. 选择板块:", list(THEME_MAP.keys()))
-real_concept_name = THEME_MAP[selected_theme_label]
+real_name = THEME_MAP[selected_theme_label]
 
 st.title(f"📊 板块透视：{selected_theme_label}")
 
-# 步骤 1: 获取名单
-with st.spinner(f"正在拉取 {real_concept_name} 成分股..."):
-    df_all = get_concept_stocks(real_concept_name)
+# 步骤 1: 获取名单 (调用智能双核接口)
+with st.spinner(f"正在全网搜索 {real_name} 数据 (双通道)..."):
+    df_all = get_stock_list_smart(real_name)
 
 if not df_all.empty:
     # 过滤器
     min_mkt_cap = st.sidebar.slider("2. 最小市值过滤 (亿)", 0, 500, 30)
     
-    # 如果市值数据缺失 (全是0)，则不做过滤
     if df_all['mkt_cap'].sum() == 0:
-        st.sidebar.warning("⚠️ 注意：数据源未返回市值数据，过滤功能已自动暂停，显示全部股票。")
+        st.sidebar.warning("⚠️ 数据源未返回市值，显示全部")
         df_filtered = df_all
     else:
         df_filtered = df_all[df_all['mkt_cap'] > (min_mkt_cap * 100000000)].copy()
@@ -168,15 +180,13 @@ if not df_all.empty:
     
     # --- 核心功能：批量扫描 ---
     
-    # 使用 Session State 保存扫描结果
     if 'scan_results' not in st.session_state:
         st.session_state.scan_results = None
         st.session_state.last_sector = None
 
-    # 如果切换了板块，清空之前的扫描结果
-    if st.session_state.last_sector != real_concept_name:
+    if st.session_state.last_sector != real_name:
         st.session_state.scan_results = None
-        st.session_state.last_sector = real_concept_name
+        st.session_state.last_sector = real_name
 
     col_btn, col_info = st.columns([1, 4])
     start_scan = col_btn.button("🚀 开始 AI 深度分类", type="primary")
@@ -185,7 +195,7 @@ if not df_all.empty:
     if start_scan:
         scan_data = {"buy": [], "sell": [], "watch": []}
         
-        # 为了演示速度，限制扫描前 40 只龙头 (想扫描全部请去掉 .head(40))
+        # 演示只扫前40只
         scan_list = df_filtered.head(40) 
         
         progress_bar = st.progress(0)
@@ -193,11 +203,9 @@ if not df_all.empty:
         
         total = len(scan_list)
         for i, (index, row) in enumerate(scan_list.iterrows()):
-            # 更新进度
             progress_bar.progress((i + 1) / total)
             status_text.text(f"正在 AI 分析: {row['name']}...")
             
-            # 获取历史并计算
             hist = get_hist_data(row['code'])
             plan = generate_trading_plan(hist, row['price'])
             
@@ -213,63 +221,48 @@ if not df_all.empty:
                 }
                 scan_data[plan['status']].append(item)
             
-            # 极小延时防止接口封禁
             time.sleep(0.05)
             
         st.session_state.scan_results = scan_data
         progress_bar.empty()
         status_text.empty()
-        st.success("✅ 扫描完成！已自动分类。")
+        st.success("✅ 扫描完成！")
 
     # --- 展示扫描结果 ---
     if st.session_state.scan_results:
         res = st.session_state.scan_results
         
-        # 定义三个 Tab
         tab1, tab2, tab3 = st.tabs([
             f"🟢 黄金低吸区 ({len(res['buy'])})", 
             f"🔴 高危止盈区 ({len(res['sell'])})", 
             f"⚪ 震荡观望区 ({len(res['watch'])})"
         ])
         
-        # 渲染函数的通用逻辑
         def render_stock_table(stock_list, type_label):
             if not stock_list:
-                st.info("当前分类下暂无股票。")
+                st.info("无")
                 return
-            
             df_res = pd.DataFrame(stock_list)
-            
-            # 配置列显示
             st.dataframe(
                 df_res,
                 column_config={
                     "code": "代码", "name": "名称",
                     "price": st.column_config.NumberColumn("现价", format="¥%.2f"),
-                    "pct": st.column_config.NumberColumn("今日涨幅", format="%.2f%%"),
-                    "buy": st.column_config.NumberColumn("支撑位(买)", format="¥%.2f", help="布林带下轨附近"),
-                    "sell": st.column_config.NumberColumn("压力位(卖)", format="¥%.2f", help="布林带上轨附近"),
+                    "pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
+                    "buy": st.column_config.NumberColumn("支撑位", format="¥%.2f"),
+                    "sell": st.column_config.NumberColumn("压力位", format="¥%.2f"),
                     "trend": "趋势"
                 },
-                hide_index=True,
-                use_container_width=True
+                hide_index=True, use_container_width=True
             )
         
-        with tab1:
-            st.markdown("##### 👇 价格已回落至支撑位附近，盈亏比较高")
-            render_stock_table(res['buy'], "buy")
-            
-        with tab2:
-            st.markdown("##### 👇 价格已触及布林带上轨，追高风险大")
-            render_stock_table(res['sell'], "sell")
-            
-        with tab3:
-            st.markdown("##### 👇 价格位于通道中间，建议多看少动")
-            render_stock_table(res['watch'], "watch")
+        with tab1: render_stock_table(res['buy'], "buy")
+        with tab2: render_stock_table(res['sell'], "sell")
+        with tab3: render_stock_table(res['watch'], "watch")
             
         st.markdown("---")
 
-    # --- 3. 个股详情 (Deep Dive) ---
+    # --- 3. 个股详情 ---
     st.subheader("🔎 个股走势验证")
     if len(df_filtered) > 0:
         default_idx = 0
@@ -305,4 +298,4 @@ if not df_all.empty:
                     st.plotly_chart(fig, use_container_width=True)
 
 else:
-    st.error("无法获取板块数据，可能是接口繁忙，请稍后重试。")
+    st.error(f"无法获取板块 [{real_name}] 数据。请检查该名称在东方财富是否属于【行业】或【概念】板块。")
