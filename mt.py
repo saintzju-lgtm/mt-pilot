@@ -43,7 +43,7 @@ retry = Retry(total=3, backoff_factor=0.5, status_forcelist=[403, 408, 500, 502,
 session.mount("http://", HTTPAdapter(max_retries=retry))
 session.mount("https://", HTTPAdapter(max_retries=retry))
 
-# ===================== 1. 核心数据服务层（修复接口+网络问题） =====================
+# ===================== 1. 核心数据服务层（最终修复版） =====================
 class StockDataService:
     """股票数据服务类 - 统一数据获取接口"""
     def __init__(self, tushare_token=""):
@@ -86,11 +86,11 @@ class StockDataService:
     
     @st.cache_data(ttl=3600)  # 1小时缓存
     def get_fundamental_data(_self, stock_code):
-        """获取基本面数据（财务+公司概况）"""
+        """获取基本面数据（财务+公司概况）- 修复字段名"""
         try:
-            # 1. 基础信息（改用更稳定的接口）
+            # 1. 基础信息（修复字段名：股票简称 → 名称）
             stock_info = ak.stock_individual_info_em(symbol=stock_code)
-            stock_name = stock_info['股票简称'].iloc[0] if not stock_info.empty else "未知股票"
+            stock_name = stock_info['名称'].iloc[0] if not stock_info.empty else "未知股票"
             
             # 2. 财务指标（增加重试+超时）
             fina_data = None
@@ -103,10 +103,9 @@ class StockDataService:
                     time.sleep(1)
             latest_fina = fina_data.iloc[0] if (fina_data is not None and not fina_data.empty) else pd.Series()
             
-            # 3. 行业分类（修复AKShare接口变更）
+            # 3. 行业分类（仅用最新接口）
             industry = "未知行业"
             try:
-                # 新接口名称：stock_industry_classified_em
                 industry_data = ak.stock_industry_classified_em(symbol=stock_code)
                 if not industry_data.empty:
                     industry = industry_data['所属行业'].iloc[0]
@@ -143,16 +142,16 @@ class StockDataService:
     
     @st.cache_data(ttl=3600)
     def get_industry_analysis(_self, stock_code):
-        """获取行业对比分析数据（修复接口）"""
+        """获取行业对比分析数据 - 彻底修复接口"""
         try:
-            # 1. 获取股票所属行业（新接口）
+            # 1. 获取股票所属行业（仅用最新接口）
             industry_data = ak.stock_industry_classified_em(symbol=stock_code)
             if industry_data.empty:
                 return {"status": "failed", "industry_name": "未知行业", "data": {}}
             
             industry = industry_data['所属行业'].iloc[0]
             
-            # 2. 获取同行业股票列表（新接口）
+            # 2. 获取同行业股票列表（仅用最新接口）
             same_industry_stocks = ak.stock_industry_classified_em(industry=industry)
             if same_industry_stocks.empty:
                 return {"status": "failed", "industry_name": industry, "data": {}}
@@ -173,7 +172,7 @@ class StockDataService:
                         "毛利率(%)": _self._format_metric(latest, "销售毛利率", lambda x: round(x*100, 2)),
                         "市盈率(TTM)": _self._format_metric(latest, "市盈率TTM", lambda x: round(x, 2)),
                         "营收同比增长": _self._format_metric(latest, "营业总收入同比增长率", lambda x: f"{x:.2f}%"),
-                        "总市值(亿元)": "N/A"  # 简化处理，避免额外接口依赖
+                        "总市值(亿元)": "N/A"
                     }
                 except:
                     continue
@@ -324,7 +323,7 @@ class StockAIPredictor:
         except Exception as e:
             return None, f"预测失败：{str(e)[:50]}"
 
-# ===================== 3. 页面UI层（修复NameError） =====================
+# ===================== 3. 页面UI层 =====================
 class StockAnalysisUI:
     """页面UI渲染类"""
     def __init__(self, data_service, ai_predictor):
@@ -426,7 +425,7 @@ class StockAnalysisUI:
         ])
         
         with tab1:
-            # 修复NameError：使用默认名称兜底
+            # 兜底处理：避免名称为空
             stock_name = fundamental_data['basic_info']['name'] or config["stock_code"]
             self._render_price_chart(df, config, prediction_result, stock_name)
         
@@ -446,7 +445,7 @@ class StockAnalysisUI:
         self._render_footer()
     
     def _render_price_chart(self, df, config, prediction_result, stock_name):
-        """渲染股价走势图（修复NameError）"""
+        """渲染股价走势图"""
         fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.05, row_heights=[0.6, 0.2, 0.2])
         
         # K线图
@@ -493,7 +492,7 @@ class StockAnalysisUI:
         fig.add_hline(y=70, line_dash="dash", line_color="red", row=3, col=1)
         fig.add_hline(y=30, line_dash="dash", line_color="green", row=3, col=1)
         
-        # 图表样式（修复NameError）
+        # 图表样式
         fig.update_layout(
             height=800, title=f"{stock_name} ({config['stock_code']}) 股价走势",
             title_x=0.5, legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
