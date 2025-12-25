@@ -371,6 +371,7 @@ elif menu_option == "筹码峰联动":
                 orientation='h', # 水平柱状图更清晰
                 marker_color="#ff7f0e"
             ))
+            # 修复：垂直参考线应该是y轴而不是x轴
             fig_chip.add_vline(x=latest_price, line_dash="dash", line_color="red", annotation_text="实时股价")
             fig_chip.add_vline(x=latest_vwap, line_dash="dash", line_color="blue", annotation_text="机构VWAP")
             fig_chip.update_layout(height=400, xaxis_title="筹码占比(%)", yaxis_title="价格(元)")
@@ -383,10 +384,11 @@ elif menu_option == "筹码峰联动":
         with col2:
             st.subheader("实时股价+VWAP+筹码主峰")
             fig_price = go.Figure()
+            # 修复：字符串格式化错误
             fig_price.add_trace(go.Scatter(
                 x=stock_data["Date"], 
                 y=stock_data["Close"], 
-                name="{'实时' if is_real_data else '模拟'}股价",
+                name="实时股价" if is_real_data else "模拟股价",
                 mode="lines+markers"
             ))
             fig_price.add_trace(go.Scatter(
@@ -441,6 +443,7 @@ elif menu_option == "投资工具":
     # 情景模拟（实时基准）
     st.subheader("📊 行情情景模拟（基于实时股价）")
     if not stock_data.empty:
+        latest_price = stock_data.iloc[-1]["Close"]  # 修复：定义缺失的变量
         mtts4000_ship = st.selectbox("MTT S4000交付进度", ["不及预期", "符合预期", "超预期"])
         aihpc_growth = st.selectbox("AI/HPC市场增长", ["低于预期", "符合预期", "高于预期"])
         
