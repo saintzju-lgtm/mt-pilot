@@ -2,36 +2,31 @@ import streamlit as st
 import akshare as ak
 import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
-import datetime
 import time
+import datetime
 
 # --- 页面配置 ---
-st.set_page_config(layout="wide", page_title="AI 量化实盘监控", page_icon="⚡")
+st.set_page_config(layout="wide", page_title="AI 实盘指挥部", page_icon="💥")
 
-# --- CSS 样式优化 (红绿涨跌色) ---
+# --- CSS 暴力美学：只看红绿 ---
 st.markdown("""
 <style>
-    .big-font { font-size: 20px !important; font-weight: bold; }
-    .buy-signal { background-color: #d4edda; padding: 10px; border-radius: 5px; border-left: 5px solid #28a745; }
-    .stDataFrame { font-size: 14px; }
+    .big-font { font-size: 24px !important; font-weight: 900; }
+    /* 涨跌颜色 */
+    .signal-buy { background-color: #d4edda; color: #155724; padding: 5px; border-radius: 4px; font-weight: bold; }
+    .signal-sell { background-color: #f8d7da; color: #721c24; padding: 5px; border-radius: 4px; font-weight: bold; }
+    .signal-hold { background-color: #e2e3e5; color: #383d41; padding: 5px; border-radius: 4px; }
+    .signal-stop { background-color: #000; color: #fff; padding: 5px; border-radius: 4px; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
 # --- 0. 核心配置 ---
-THEME_MAP = {
-    "算力/CPO (概念)": "CPO概念",
-    "人工智能 (概念)": "人工智能",
-    "半导体 (行业)": "半导体",        
-    "存储芯片 (概念)": "存储芯片",
-    "PCB (行业)": "印制电路板",       
-    "英伟达概念": "英伟达概念",
-    "消费电子 (行业)": "消费电子",
-    "机器人 (概念)": "机器人概念",
-    "低空经济 (概念)": "低空经济"
-}
+# 默认关注的板块
+DEFAULT_SECTOR = "CPO概念" 
+# 默认持仓 (方便演示，你可以改)
+DEFAULT_PORTFOLIO = "300308, 601138, 002230, 688256"
 
-# --- 1. 数据获取模块 ---
+# --- 1. 数据引擎 (保留最稳健的获取逻辑) ---
 
 @st.cache_data(ttl=600)
 def fetch_all_market_caps():
@@ -42,229 +37,242 @@ def fetch_all_market_caps():
         df.rename(columns={'代码': 'code', '总市值': 'mkt_cap_patch'}, inplace=True)
         df['mkt_cap_patch'] = pd.to_numeric(df['mkt_cap_patch'], errors='coerce').fillna(0)
         return df
-    except:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
-@st.cache_data(ttl=300) # 列表缓存5分钟
-def get_stock_list_smart(symbol_name):
-    """智能获取成分股"""
-    df = pd.DataFrame()
-    
-    def clean_data(raw_df):
-        if raw_df.empty: return pd.DataFrame()
-        rename_map = {
-            '代码': 'code', '名称': 'name', '最新价': 'price', 
-            '涨跌幅': 'pct_chg', '成交量': 'volume', '成交额': 'amount',
-            '总市值': 'mkt_cap', '总市值(元)': 'mkt_cap', '流通市值': 'mkt_cap' 
-        }
-        raw_df.rename(columns=rename_map, inplace=True)
-        required_cols = ['code', 'name', 'price', 'pct_chg', 'volume', 'mkt_cap']
-        for col in required_cols:
-            if col not in raw_df.columns: raw_df[col] = 0 
-        final_df = raw_df[required_cols].copy()
-        for col in ['price', 'pct_chg', 'mkt_cap', 'volume']:
-            final_df[col] = pd.to_numeric(final_df[col], errors='coerce').fillna(0)
-        return final_df
-
+@st.cache_data(ttl=300)
+def get_sector_stocks(symbol_name):
+    """获取板块数据"""
     try:
         df = ak.stock_board_concept_cons_em(symbol=symbol_name)
-        df = clean_data(df)
     except:
-        try:
-            df = ak.stock_board_industry_cons_em(symbol=symbol_name)
-            df = clean_data(df)
-        except:
-            return pd.DataFrame()
-
+        try: df = ak.stock_board_industry_cons_em(symbol=symbol_name)
+        except: return pd.DataFrame()
+    
     if df.empty: return pd.DataFrame()
+    
+    # 清洗
+    rename_map = {'代码': 'code', '名称': 'name', '最新价': 'price', '涨跌幅': 'pct_chg', '总市值': 'mkt_cap', '成交量': 'volume'}
+    df.rename(columns=rename_map, inplace=True)
+    
+    # 补全字段
+    for col in ['code', 'name', 'price', 'pct_chg', 'mkt_cap', 'volume']:
+        if col not in df.columns: df[col] = 0
+            
+    # 数值转换
+    for col in ['price', 'pct_chg', 'mkt_cap', 'volume']:
+        df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-    # 市值补全
+    # 市值修复
     if df['mkt_cap'].sum() == 0:
-        patch_df = fetch_all_market_caps()
-        if not patch_df.empty:
-            df = pd.merge(df, patch_df, on='code', how='left')
+        patch = fetch_all_market_caps()
+        if not patch.empty:
+            df = pd.merge(df, patch, on='code', how='left')
             df['mkt_cap'] = df['mkt_cap_patch'].fillna(0)
-            df.drop(columns=['mkt_cap_patch'], inplace=True)
             
     return df
 
-@st.cache_data(ttl=3600)
-def get_hist_data(code):
-    """获取历史K线"""
-    end_date = datetime.datetime.now().strftime("%Y%m%d")
-    start_date = (datetime.datetime.now() - datetime.timedelta(days=180)).strftime("%Y%m%d")
+def get_realtime_price(code):
+    """获取单只股票实时行情"""
     try:
-        df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
-        if df.empty: return pd.DataFrame()
-        df.rename(columns={'日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low', '成交量': 'volume'}, inplace=True)
-        df['date'] = pd.to_datetime(df['date'])
-        df.set_index('date', inplace=True)
-        return df
-    except:
-        return pd.DataFrame()
+        df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=(datetime.datetime.now()-datetime.timedelta(days=5)).strftime("%Y%m%d"), adjust="qfq")
+        if df.empty: return None
+        return df.iloc[-1]['收盘']
+    except: return None
 
-# --- 2. 核心算法 ---
-def generate_trading_plan(df, current_price):
-    if df.empty or len(df) < 20: return None
-    data = df.copy()
+@st.cache_data(ttl=3600) 
+def get_hist_data(code):
+    """获取计算指标用的历史数据"""
+    end = datetime.datetime.now().strftime("%Y%m%d")
+    start = (datetime.datetime.now() - datetime.timedelta(days=120)).strftime("%Y%m%d")
+    try:
+        df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start, end_date=end, adjust="qfq")
+        df.rename(columns={'日期': 'date', '开盘': 'open', '收盘': 'close', '最高': 'high', '最低': 'low'}, inplace=True)
+        return df
+    except: return pd.DataFrame()
+
+# --- 2. 核心量化大脑 (生成指令) ---
+def analyze_stock(code, name, current_price=None):
+    hist = get_hist_data(code)
+    if hist.empty or len(hist) < 20: return None
     
-    # 布林带
-    data['MA20'] = data['close'].rolling(window=20).mean()
-    data['std'] = data['close'].rolling(window=20).std()
-    data['Upper'] = data['MA20'] + (data['std'] * 2)
-    data['Lower'] = data['MA20'] - (data['std'] * 2)
-    
-    # ATR
-    data['tr'] = np.maximum((data['high'] - data['low']), 
-                            np.maximum(abs(data['high'] - data['close'].shift(1)), 
-                                       abs(data['low'] - data['close'].shift(1))))
-    atr = data['tr'].rolling(window=14).mean().iloc[-1]
-    
-    last = data.iloc[-1]
-    
-    support = max(last['Lower'], data['low'].tail(20).min())
-    resistance = min(last['Upper'], data['high'].tail(20).max())
-    
-    buy_entry = support * 1.01
-    take_profit = resistance * 0.99
-    stop_loss = buy_entry - (1.5 * atr)
-    
-    status = "watch"
-    
-    # 策略核心：价格跌破支撑位附近 +1%
-    if current_price <= buy_entry * 1.02: 
-        status = "buy"
-    elif current_price >= take_profit * 0.98:
-        status = "sell"
+    # 如果没传现价，就用历史最后一天(收盘后)
+    if current_price is None:
+        current_price = hist.iloc[-1]['close']
         
-    trend = "多头" if current_price > last['MA20'] else "空头"
+    # 计算布林带
+    hist['MA20'] = hist['close'].rolling(20).mean()
+    hist['std'] = hist['close'].rolling(20).std()
+    hist['Upper'] = hist['MA20'] + 2*hist['std']
+    hist['Lower'] = hist['MA20'] - 2*hist['std']
+    
+    # 计算ATR
+    hist['tr'] = np.maximum((hist['high'] - hist['low']), 
+                 np.maximum(abs(hist['high'] - hist['close'].shift(1)), abs(hist['low'] - hist['close'].shift(1))))
+    atr = hist['tr'].rolling(14).mean().iloc[-1]
+    
+    last = hist.iloc[-1]
+    
+    # === 关键点位 ===
+    buy_point = last['Lower'] * 1.01  # 下轨上方1%接货
+    sell_point = last['Upper'] * 0.99 # 上轨下方1%出货
+    stop_loss = buy_point - 1.5 * atr # 止损
+    
+    # === 生成指令 ===
+    action = "HOLD"
+    signal_color = "⚪ 观望"
+    suggestion = "多看少动"
+    
+    # 距离买点差距
+    dist_buy = (current_price - buy_point) / current_price
+    # 距离卖点差距
+    dist_sell = (sell_point - current_price) / current_price
+    
+    if current_price < stop_loss:
+        action = "STOP"
+        signal_color = "⚫ 止损"
+        suggestion = "破位离场"
+    elif current_price <= buy_point * 1.02: # 价格到了买点附近2%以内
+        action = "BUY"
+        signal_color = "🔴 低吸"
+        suggestion = f"挂单 ¥{buy_point:.2f}"
+    elif current_price >= sell_point * 0.98: # 价格到了卖点附近2%以内
+        action = "SELL"
+        signal_color = "🟢 止盈"
+        suggestion = f"分批卖出"
+    else:
+        # 中间状态
+        if dist_buy < dist_sell:
+            suggestion = f"回踩 ¥{buy_point:.2f} 接"
+        else:
+            suggestion = f"反弹 ¥{sell_point:.2f} 抛"
 
     return {
-        "status": status,
-        "trend": trend,
-        "buy_entry": buy_entry,
-        "take_profit": take_profit,
-        "stop_loss": stop_loss,
-        "upper_hist": data['Upper'], 
-        "lower_hist": data['Lower']
+        "代码": code,
+        "名称": name,
+        "现价": current_price,
+        "指令": signal_color,
+        "操作建议": suggestion,
+        "挂单价(买)": buy_point,
+        "止盈价(卖)": sell_point,
+        "止损线": stop_loss,
+        "action_code": action # 用于排序
     }
 
 # --- 3. 界面逻辑 ---
 
-# 侧边栏设置
-st.sidebar.header("🕹️ 监控设置")
-selected_theme_label = st.sidebar.selectbox("1. 监控板块:", list(THEME_MAP.keys()))
-real_name = THEME_MAP[selected_theme_label]
+# 侧边栏：设置区
+st.sidebar.header("⚙️ 监控配置")
+portfolio_input = st.sidebar.text_area("我的持仓代码 (逗号分隔):", value=DEFAULT_PORTFOLIO, height=100)
+sector_select = st.sidebar.selectbox("雷达扫描板块:", ["CPO概念", "人工智能", "芯片概念", "PCB", "低空经济", "机器人概念"])
+auto_refresh = st.sidebar.toggle("⚡ 开启 30s 自动循环", value=False)
 
-min_mkt_cap = st.sidebar.slider("2. 最小市值 (亿)", 0, 500, 50)
-scan_limit = st.sidebar.slider("3. 扫描龙头数量 (越少越快)", 10, 100, 30, help="为了保证10秒刷新，建议只扫描前30-50只龙头")
-
-st.sidebar.markdown("---")
-auto_refresh = st.sidebar.toggle("⚡ 开启 10s 自动刷新", value=False)
-
-# 标题区
-st.title(f"⚡ AI 量化实盘监控：{selected_theme_label}")
+# 标题
+st.title("🛡️ AI 实盘指挥部")
+t = datetime.datetime.now().strftime("%H:%M:%S")
 if auto_refresh:
-    st.caption(f"🟢 监控运行中... 每 10 秒刷新一次 | 扫描范围: Top {scan_limit} 活跃股")
+    st.caption(f"上次更新: {t} | 状态: 🟢 监控中 (30s刷新)")
 else:
-    st.caption("🔴 监控暂停 | 请开启侧边栏开关以启动实时刷新")
+    st.caption(f"上次更新: {t} | 状态: ⏸️ 已暂停")
 
-# 主逻辑
-df_all = get_stock_list_smart(real_name)
+# === 第一部分：我的持仓监控 (最重要，放最上面) ===
+st.subheader("💼 我的持仓 · 今日策略")
 
-if not df_all.empty:
-    # 过滤与排序
-    if df_all['mkt_cap'].sum() == 0:
-        df_filtered = df_all
+my_stocks = [x.strip() for x in portfolio_input.split(",") if x.strip()]
+my_results = []
+
+if my_stocks:
+    cols = st.columns(len(my_stocks))
+    for i, code in enumerate(my_stocks):
+        # 获取最新数据
+        # 这里为了速度，实战中应该用 ak.stock_zh_a_spot_em 批量获取，这里简化逻辑逐个获取保证稳定性
+        try:
+            # 简单起见，这里假设用户输入的是正确代码
+            # 获取名字比较麻烦，这里暂用代码代替或调用一次历史数据拿名字
+            df_info = ak.stock_zh_a_spot_em()
+            name = df_info[df_info['代码'] == code]['名称'].values[0] if not df_info[df_info['代码'] == code].empty else code
+            price = df_info[df_info['代码'] == code]['最新价'].values[0] if not df_info[df_info['代码'] == code].empty else 0
+            
+            res = analyze_stock(code, name, price)
+            if res:
+                my_results.append(res)
+        except:
+            continue
+
+if my_results:
+    # 转换成 DataFrame 展示
+    df_my = pd.DataFrame(my_results)
+    
+    # 样式化表格
+    st.dataframe(
+        df_my[['代码', '名称', '现价', '指令', '操作建议', '挂单价(买)', '止盈价(卖)', '止损线']],
+        column_config={
+            "现价": st.column_config.NumberColumn(format="¥%.2f"),
+            "挂单价(买)": st.column_config.NumberColumn(format="¥%.2f"),
+            "止盈价(卖)": st.column_config.NumberColumn(format="¥%.2f"),
+            "止损线": st.column_config.NumberColumn(format="¥%.2f"),
+        },
+        hide_index=True,
+        use_container_width=True
+    )
+else:
+    st.info("暂无持仓数据，请在左侧添加代码。")
+
+st.markdown("---")
+
+# === 第二部分：全市场低吸雷达 (只看机会) ===
+st.subheader(f"📡 {sector_select} · 低吸机会雷达")
+
+# 获取板块数据
+df_sector = get_sector_stocks(sector_select)
+
+if not df_sector.empty:
+    # 过滤市值太小的，按成交额排序取前30 (保证速度)
+    if 'mkt_cap' in df_sector.columns:
+        df_active = df_sector[df_sector['mkt_cap'] > 5000000000].sort_values(by='volume', ascending=False).head(30)
     else:
-        df_filtered = df_all[df_all['mkt_cap'] > (min_mkt_cap * 100000000)].copy()
+        df_active = df_sector.head(30)
     
-    # 按【成交额】排序，优先看活跃的龙头，而不是按涨幅
-    # 这样能保证你看到的都是有流动性的票
-    if 'amount' in df_filtered.columns:
-        df_filtered = df_filtered.sort_values(by='amount', ascending=False)
-    else:
-        df_filtered = df_filtered.sort_values(by='pct_chg', ascending=False)
+    radar_results = []
     
-    # 截取前 N 只进行扫描
-    scan_list = df_filtered.head(scan_limit)
+    # 进度条 (仅非自动模式显示)
+    if not auto_refresh:
+        progress = st.progress(0)
     
-    # --- 核心扫描逻辑 ---
-    # 如果开启自动刷新，或者没有缓存结果，就执行扫描
-    should_scan = True
-    
-    if should_scan:
-        buy_signals = []
-        
-        # 进度条容器 (仅在非自动模式下显示，避免闪烁)
+    for i, (idx, row) in enumerate(df_active.iterrows()):
         if not auto_refresh:
-            progress_bar = st.progress(0)
-        
-        total = len(scan_list)
-        for i, (index, row) in enumerate(scan_list.iterrows()):
-            if not auto_refresh:
-                progress_bar.progress((i + 1) / total)
+            progress.progress((i+1)/len(df_active))
             
-            # 获取数据
-            hist = get_hist_data(row['code'])
-            plan = generate_trading_plan(hist, row['price'])
-            
-            if plan and plan['status'] == "buy":
-                # 计算量化操作建议
-                profit_space = (plan['take_profit'] - plan['buy_entry']) / plan['buy_entry'] * 100
-                
-                buy_signals.append({
-                    "代码": row['code'],
-                    "名称": row['name'],
-                    "现价": row['price'],
-                    "涨幅": f"{row['pct_chg']:.2f}%",
-                    "🎯 低吸挂单价": f"¥{plan['buy_entry']:.2f}",
-                    "🛑 止损价": f"¥{plan['stop_loss']:.2f}",
-                    "🚀 目标止盈": f"¥{plan['take_profit']:.2f}",
-                    "理论盈亏比": f"{profit_space:.1f}%",
-                    "趋势": plan['trend']
-                })
+        res = analyze_stock(row['code'], row['name'], row['price'])
         
-        if not auto_refresh:
-            progress_bar.empty()
-
-        # --- 结果展示区 (置顶) ---
+        # 只保留【低吸】信号的股票
+        if res and res['action_code'] == "BUY":
+            radar_results.append(res)
+    
+    if not auto_refresh:
+        progress.empty()
+    
+    # 展示雷达结果
+    if radar_results:
+        st.success(f"🚨 扫描完成！发现 {len(radar_results)} 个潜在买点！")
+        df_radar = pd.DataFrame(radar_results)
         
-        # 1. 🚨 黄金低吸名单 (最重要!)
-        if buy_signals:
-            st.markdown(f"### 🚨 发现 {len(buy_signals)} 个低吸机会 (立即关注)")
-            st.markdown("""
-            <div class="buy-signal">
-            <b>💡 量化操作指南：</b><br>
-            1. <b>低吸挂单价</b>：建议在券商APP以此价格埋伏挂单（Limit Order）。<br>
-            2. <b>止损价</b>：收盘价若跌破此价格，建议无脑离场。<br>
-            3. <b>盈亏比</b>：数值越大，这笔交易越划算。
-            </div>
-            """, unsafe_allow_html=True)
-            
-            st.table(pd.DataFrame(buy_signals)) # 使用 Table 展示更清晰
-        else:
-            st.info("🍵 当前扫描范围内暂无【低吸】信号，行情可能在高位或中间态，建议观望。")
-
-        st.markdown("---")
-
-        # 2. 实时行情概览 (为了不让下面太空)
-        st.subheader("📋 活跃龙头监控 (Top List)")
         st.dataframe(
-            scan_list[['code', 'name', 'price', 'pct_chg', 'mkt_cap']],
+            df_radar[['代码', '名称', '现价', '指令', '操作建议', '挂单价(买)', '止损线']],
             column_config={
-                "code": "代码", "name": "名称", 
-                "price": st.column_config.NumberColumn("现价", format="¥%.2f"),
-                "pct_chg": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
-                "mkt_cap": st.column_config.NumberColumn("市值", format="¥%.0f")
+                "现价": st.column_config.NumberColumn(format="¥%.2f"),
+                "挂单价(买)": st.column_config.NumberColumn(format="¥%.2f"),
+                "止损线": st.column_config.NumberColumn(format="¥%.2f"),
             },
-            hide_index=True, use_container_width=True, height=300
+            hide_index=True,
+            use_container_width=True
         )
-
-    # --- 自动刷新逻辑 ---
-    if auto_refresh:
-        time.sleep(10) # 等待10秒
-        st.rerun()     # 重新运行整个脚本
+    else:
+        st.warning(f"🍵 当前板块 ({sector_select}) 龙头股均未出现低吸信号，建议空仓或观望。")
 
 else:
-    st.error(f"无法获取 {real_name} 数据，请检查网络或稍后重试。")
+    st.error("板块数据获取失败。")
+
+# --- 自动刷新 ---
+if auto_refresh:
+    time.sleep(30)
+    st.rerun()
