@@ -6,7 +6,6 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 import time
-from plyer import notification
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -34,7 +33,7 @@ DEFAULT_CONFIG = {
 def is_market_open():
     """判断当前是否为交易时间"""
     now = datetime.now()
-    # 交易日判断（简化版：周一到周五，排除节假日，进阶可对接akshare的交易日历）
+    # 交易日判断（简化版：周一到周五，排除节假日）
     if now.weekday() >= 5:  # 周六/周日
         return False
     # 交易时段判断
@@ -204,17 +203,6 @@ def select_stocks():
     status_text.empty()
     return final_df
 
-def send_notification(title, message):
-    """桌面预警通知（扩展功能1：预警）"""
-    try:
-        notification.notify(
-            title=title,
-            message=message,
-            timeout=10  # 通知显示10秒
-        )
-    except:
-        st.warning("桌面通知功能暂不支持当前系统")
-
 def backtest_simple(code):
     """简单历史回测（扩展功能2：回测）"""
     try:
@@ -272,7 +260,8 @@ def main():
         DEFAULT_CONFIG["circ_mv_max"] = st.number_input("流通市值上限(亿)", min_value=100, max_value=500, value=200)
         DEFAULT_CONFIG["turnover_rate_min"] = st.slider("当日换手率下限(%)", 5, 15, 8)
         auto_refresh = st.checkbox("开启自动刷新", value=True)
-        enable_notify = st.checkbox("开启买入信号桌面预警", value=True)
+        # 注释掉桌面预警开关（云部署不支持）
+        # enable_notify = st.checkbox("开启买入信号桌面预警", value=True)
         
         st.divider()
         st.header("📊 扩展功能")
@@ -317,14 +306,9 @@ def main():
                     column_config={"买入信号": st.column_config.CheckboxColumn("买入信号")}
                 )
                 
-                # 扩展1：买入信号预警
+                # 注释掉桌面预警相关代码（云部署不支持）
                 buy_signal_stocks = result_df[result_df["买入信号"] == True]
-                if len(buy_signal_stocks) > 0 and enable_notify and is_market_open():
-                    notify_stocks = buy_signal_stocks["股票名称"].tolist()[:3]
-                    send_notification(
-                        title="📢 买入信号提醒",
-                        message=f"以下股票符合买入条件：{','.join(notify_stocks)}"
-                    )
+                if len(buy_signal_stocks) > 0:
                     st.markdown("### 🚨 买入信号预警")
                     st.dataframe(buy_signal_stocks[["股票代码", "股票名称", "当前价格", "5日均线", "建议仓位(%)"]], use_container_width=True)
                 
