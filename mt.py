@@ -2,10 +2,12 @@ import streamlit as st
 import pandas as pd
 import akshare as ak
 import time
+import threading
+from datetime import datetime
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v2.1：狙击作战版",
+    page_title="游资捕手 v3.0：光速服务器版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -13,10 +15,9 @@ st.set_page_config(
 
 # --- 核心策略逻辑封装 ---
 class YangStrategy:
-    
+    """策略逻辑保持不变"""
     @staticmethod
     def get_market_data_with_retry(max_retries=3):
-        """带重试机制的数据获取"""
         for i in range(max_retries):
             try:
                 df = ak.stock_zh_a_spot_em()
@@ -35,28 +36,17 @@ class YangStrategy:
                     time.sleep(2)
                     continue
                 else:
-                    st.toast(f"连接超时，请重试: {e}", icon="⚠️")
+                    print(f"后台数据获取失败: {e}") # 打印到后台日志
                     return pd.DataFrame()
         return pd.DataFrame()
 
     @staticmethod
     def calculate_battle_plan(df):
-        """
-        生成作战计划：买入区间、止损价、止盈预期、T+1策略
-        """
         if df.empty: return df
-        
-        # 1. 建议买入价：杨永兴风格是势能确立后立刻进，但不能追太高
-        # 逻辑：现价即买点，但设定上限为现价+0.5%（防止滑点过大）
         df['Buy_Price'] = df['Price']
-        
-        # 2. 严格止损价：成本价 - 3%
         df['Stop_Loss'] = df['Price'] * 0.97
-        
-        # 3. 短线目标价：成本价 + 8% (博弈隔日溢价)
         df['Target_Price'] = df['Price'] * 1.08
         
-        # 4. 生成文字版操盘建议
         def generate_t1_strategy(row):
             if row['Change_Pct'] > 9.0:
                 return "排板策略: 涨停封死则持有，炸板立即走。"
@@ -68,7 +58,6 @@ class YangStrategy:
 
     @staticmethod
     def check_sell_signals(holdings_df):
-        """持仓风控逻辑 (v2.0功能保留)"""
         signals = []
         if holdings_df.empty: return pd.DataFrame()
 
@@ -103,7 +92,6 @@ class YangStrategy:
 
     @staticmethod
     def filter_stocks(df, max_cap, min_turnover, min_change, max_change, min_vol_ratio):
-        """选股逻辑"""
         if df.empty: return df
         df['Market_Cap_Billions'] = df['Market_Cap'] / 100000000
         filtered = df[
@@ -113,11 +101,56 @@ class YangStrategy:
             (df['Change_Pct'] <= max_change) &
             (df['Volume_Ratio'] >= min_vol_ratio)
         ]
-        # 计算作战计划
         return YangStrategy.calculate_battle_plan(filtered).sort_values(by='Turnover_Rate', ascending=False)
 
-# --- UI 界面 ---
-st.title("🦅 游资捕手 v2.1：狙击作战版")
+# --- 核心架构升级：后台数据引擎 ---
+# 使用 @st.cache_resource 确保这个类在服务器内存中只存在一份（单例模式）
+# 无论多少个用户打开网页，都共享这一份数据，且只由一个后台线程负责更新
+
+@st.cache_resource
+class BackgroundMarketEngine:
+    def __init__(self):
+        self.raw_data = pd.DataFrame()
+        self.last_update_time = None
+        self.lock = threading.Lock() # 线程锁，防止读写冲突
+        self.running = True
+        
+        # 启动后台线程
+        self.thread = threading.Thread(target=self._worker_loop, daemon=True)
+        self.thread.start()
+        
+    def _worker_loop(self):
+        """后台默默工作的工人，每隔60秒去搬运一次数据"""
+        while self.running:
+            print(f"[{datetime.now()}] 后台引擎开始刷新数据...")
+            try:
+                # 执行耗时的网络请求
+                new_df = YangStrategy.get_market_data_with_retry()
+                
+                if not new_df.empty:
+                    with self.lock:
+                        self.raw_data = new_df
+                        self.last_update_time = datetime.now()
+                    print(f"[{datetime.now()}] 数据刷新成功，共 {len(new_df)} 条")
+                else:
+                    print("数据获取为空，跳过更新")
+            except Exception as e:
+                print(f"后台刷新异常: {e}")
+            
+            # 休息60秒
+            time.sleep(60)
+
+    def get_latest_data(self):
+        """前端页面调用的接口，直接返回内存中的数据，0延迟"""
+        with self.lock:
+            # 返回数据的副本，防止前端修改影响后台
+            return self.raw_data.copy(), self.last_update_time
+
+# 初始化引擎（如果是第一次启动服务器，这里会触发后台线程启动）
+data_engine = BackgroundMarketEngine()
+
+# --- UI 界面 (保持完全一致) ---
+st.title("🦅 游资捕手 v3.0：光速服务器版")
 
 with st.sidebar:
     st.header("⚙️ 1. 选股参数 (买)")
@@ -133,22 +166,39 @@ with st.sidebar:
     user_holdings = st.text_area("持仓代码 (逗号分隔)", value="000001,600519", height=70)
     
     st.divider()
-    if st.button("🚀 启动全市场扫描", type="primary"):
-        st.cache_data.clear()
+    # 按钮逻辑改变：现在是手动触发页面重绘，读取最新后台数据
+    if st.button("🚀 刷新视图 (读取后台最新)", type="primary"):
+        st.rerun()
+    
+    # 自动刷新前端页面（可选，让页面每60秒自动变一次，配合后台）
+    auto_refresh = st.checkbox("页面自动同步 (每60s)", value=False)
+    if auto_refresh:
+        time.sleep(60)
+        st.rerun()
 
-# --- 主程序 ---
+# --- 主程序逻辑 ---
+
 status_placeholder = st.empty()
-status_placeholder.info("⏳ 连接交易所数据中... (自动重试机制已开启)")
 
-raw_df = YangStrategy.get_market_data_with_retry()
+# 1. 直接从内存引擎获取数据（毫秒级）
+raw_df, last_time = data_engine.get_latest_data()
 
-if not raw_df.empty:
-    status_placeholder.success(f"✅ 市场扫描完毕 | 股票总数: {len(raw_df)}")
+# 2. 处理冷启动情况（服务器刚开，后台线程还没跑完第一次）
+if raw_df.empty:
+    status_placeholder.warning("⏳ 服务器后台正在进行首次数据拉取，请稍等几秒后手动刷新页面...")
+    # 可以选择在这里强制等待一下，或者让用户手动刷
+    time.sleep(1) 
+    st.rerun()
+else:
+    time_str = last_time.strftime('%H:%M:%S')
+    status_placeholder.success(f"✅ 数据已就绪 (服务器端无需等待) | 后台最后更新: {time_str}")
 
-    # Tab 分页：让买和卖的逻辑更清晰
+    # Tab 分页
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
-    # --- TAB 1: 狙击买入 ---
+    # --- TAB 1: 狙击买入 (前端极速计算) ---
+    # 注：虽然数据是后台抓的，但筛选（filter）是在前端做的
+    # 因为每个用户在Sidebar调整的参数不同，这部分计算量极小(0.01s)，不会卡顿
     with tab1:
         result_df = YangStrategy.filter_stocks(raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio)
         
@@ -156,7 +206,6 @@ if not raw_df.empty:
             st.markdown(f"### 🎯 发现 {len(result_df)} 个潜在爆发标的")
             st.caption("建议操作：现价买入，严格执行下方生成的止损价。")
             
-            # 核心数据展示
             st.dataframe(
                 result_df[[
                     'Symbol', 'Name', 'Price', 'Change_Pct', 
@@ -164,32 +213,13 @@ if not raw_df.empty:
                     'Turnover_Rate', 'Volume_Ratio'
                 ]],
                 column_config={
-                    "Symbol": "代码", 
-                    "Name": "名称",
+                    "Symbol": "代码", "Name": "名称",
                     "Price": st.column_config.NumberColumn("现价", format="¥%.2f"),
                     "Change_Pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
-                    
-                    # 新增核心作战列
-                    "Buy_Price": st.column_config.NumberColumn(
-                        "建议买入", 
-                        help="建议在此价格附近直接挂单扫货",
-                        format="¥%.2f"
-                    ),
-                    "Stop_Loss": st.column_config.NumberColumn(
-                        "🛑 止损价", 
-                        help="跌破此价格必须无条件止损 (-3%)",
-                        format="¥%.2f"
-                    ),
-                    "Target_Price": st.column_config.NumberColumn(
-                        "🎯 目标价", 
-                        help="短期第一止盈目标位",
-                        format="¥%.2f"
-                    ),
-                    "Action_Plan": st.column_config.TextColumn(
-                        "📋 后续操盘建议",
-                        width="medium"
-                    ),
-                    
+                    "Buy_Price": st.column_config.NumberColumn("建议买入", format="¥%.2f"),
+                    "Stop_Loss": st.column_config.NumberColumn("🛑 止损价", format="¥%.2f"),
+                    "Target_Price": st.column_config.NumberColumn("🎯 目标价", format="¥%.2f"),
+                    "Action_Plan": st.column_config.TextColumn("📋 后续操盘建议", width="medium"),
                     "Turnover_Rate": st.column_config.ProgressColumn("换手", format="%.1f%%", min_value=0, max_value=20),
                     "Volume_Ratio": st.column_config.NumberColumn("量比", format="%.1f")
                 },
@@ -197,16 +227,15 @@ if not raw_df.empty:
                 use_container_width=True
             )
             
-            # 重点票详细卡片
             if not result_df.empty:
                 best_pick = result_df.iloc[0]
                 st.info(f"""
-                **🔥 重点关注：{best_pick['Name']} ({best_pick['Symbol']})** * **买入逻辑：** 量比 {best_pick['Volume_Ratio']} + 换手 {best_pick['Turnover_Rate']}%，资金攻击意愿最强。
+                **🔥 重点关注：{best_pick['Name']} ({best_pick['Symbol']})**
                 * **执行纪律：** 现价 **¥{best_pick['Price']}** 买入，若跌破 **¥{best_pick['Stop_Loss']:.2f}** 立即砍仓。
                 * **T+1 剧本：** {best_pick['Action_Plan']}
                 """)
         else:
-            st.warning("当前没有符合【杨永兴战法】的标的。市场可能处于冰点，建议空仓休息。")
+            st.warning("当前没有符合【杨永兴战法】的标的。建议休息。")
 
     # --- TAB 2: 风控卖出 ---
     with tab2:
@@ -229,9 +258,6 @@ if not raw_df.empty:
                         </div>
                         """, unsafe_allow_html=True)
             else:
-                st.warning("未找到持仓数据，请检查代码格式。")
+                st.warning("未找到持仓数据，请检查代码。")
         else:
             st.info("请在左侧输入持仓代码以开启监控。")
-
-else:
-    status_placeholder.error("❌ 数据获取失败。请检查网络连接（VPN等）或稍后再试。")
