@@ -3,50 +3,70 @@ import pandas as pd
 import akshare as ak
 import time
 import threading
+import logging  # 引入标准日志库，替代 print，防止 Streamlit 线程冲突
 from datetime import datetime
+
+# --- 配置日志 ---
+# 这样配置后，后台的信息会输出到终端，但不会被 Streamlit 拦截导致报错
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v3.0：光速服务器版",
+    page_title="游资捕手 v3.2：专属持仓版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# --- 核心策略逻辑封装 ---
+# --- 核心策略逻辑 ---
 class YangStrategy:
-    """策略逻辑保持不变"""
+    
     @staticmethod
-    def get_market_data_with_retry(max_retries=3):
+    def get_market_data_silent(max_retries=3):
+        """
+        静默版数据获取：移除所有 print 和 st.toast，防止线程报错
+        """
         for i in range(max_retries):
             try:
+                # 获取全市场实时行情
                 df = ak.stock_zh_a_spot_em()
+                
+                # 数据清洗
                 df = df.rename(columns={
                     '代码': 'Symbol', '名称': 'Name', '最新价': 'Price',
                     '涨跌幅': 'Change_Pct', '换手率': 'Turnover_Rate',
                     '量比': 'Volume_Ratio', '总市值': 'Market_Cap',
                     '最高': 'High', '最低': 'Low', '今开': 'Open'
                 })
+                
+                # 数值转换
                 cols = ['Price', 'Change_Pct', 'Turnover_Rate', 'Volume_Ratio', 'Market_Cap', 'High', 'Low', 'Open']
                 for col in cols:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
+                
                 return df
             except Exception as e:
+                # 使用 logging 而不是 print
+                logging.error(f"数据获取重试中... 错误: {e}")
                 if i < max_retries - 1:
                     time.sleep(2)
                     continue
                 else:
-                    print(f"后台数据获取失败: {e}") # 打印到后台日志
                     return pd.DataFrame()
         return pd.DataFrame()
 
     @staticmethod
     def calculate_battle_plan(df):
+        """生成作战计划"""
         if df.empty: return df
+        # 建议买入价：现价
         df['Buy_Price'] = df['Price']
+        # 止损价：-3%
         df['Stop_Loss'] = df['Price'] * 0.97
+        # 目标价：+8%
         df['Target_Price'] = df['Price'] * 1.08
         
+        # 生成 T+1 策略文案
         def generate_t1_strategy(row):
             if row['Change_Pct'] > 9.0:
                 return "排板策略: 涨停封死则持有，炸板立即走。"
@@ -58,6 +78,7 @@ class YangStrategy:
 
     @staticmethod
     def check_sell_signals(holdings_df):
+        """卖出/风控信号计算"""
         signals = []
         if holdings_df.empty: return pd.DataFrame()
 
@@ -67,10 +88,13 @@ class YangStrategy:
             color = "#e6f3ff"
             border_color = "#ccc"
 
+            # 逻辑A: 硬止损
             if row['Change_Pct'] < -3.0:
                 status = "🛑 止损卖出"
-                reason.append("触及-3%止损线，不仅没涨反而大跌")
+                reason.append("触及-3%止损线，趋势走坏")
                 color = "#ffe6e6"; border_color = "red"
+            
+            # 逻辑B: 冲高回落
             elif row['High'] > 0:
                 drawdown = (row['High'] - row['Price']) / row['High'] * 100
                 if row['Change_Pct'] > 0 and drawdown > 4.0:
@@ -92,6 +116,7 @@ class YangStrategy:
 
     @staticmethod
     def filter_stocks(df, max_cap, min_turnover, min_change, max_change, min_vol_ratio):
+        """筛选逻辑"""
         if df.empty: return df
         df['Market_Cap_Billions'] = df['Market_Cap'] / 100000000
         filtered = df[
@@ -103,16 +128,13 @@ class YangStrategy:
         ]
         return YangStrategy.calculate_battle_plan(filtered).sort_values(by='Turnover_Rate', ascending=False)
 
-# --- 核心架构升级：后台数据引擎 ---
-# 使用 @st.cache_resource 确保这个类在服务器内存中只存在一份（单例模式）
-# 无论多少个用户打开网页，都共享这一份数据，且只由一个后台线程负责更新
-
+# --- 核心架构：后台数据引擎 (静默版) ---
 @st.cache_resource
 class BackgroundMarketEngine:
     def __init__(self):
         self.raw_data = pd.DataFrame()
         self.last_update_time = None
-        self.lock = threading.Lock() # 线程锁，防止读写冲突
+        self.lock = threading.Lock()
         self.running = True
         
         # 启动后台线程
@@ -120,37 +142,38 @@ class BackgroundMarketEngine:
         self.thread.start()
         
     def _worker_loop(self):
-        """后台默默工作的工人，每隔60秒去搬运一次数据"""
+        """
+        后台线程：绝对不能包含 print() 或 st.xxx()
+        """
         while self.running:
-            print(f"[{datetime.now()}] 后台引擎开始刷新数据...")
+            logging.info("后台引擎开始刷新数据...")
             try:
-                # 执行耗时的网络请求
-                new_df = YangStrategy.get_market_data_with_retry()
+                # 调用静默版获取函数
+                new_df = YangStrategy.get_market_data_silent()
                 
                 if not new_df.empty:
                     with self.lock:
                         self.raw_data = new_df
                         self.last_update_time = datetime.now()
-                    print(f"[{datetime.now()}] 数据刷新成功，共 {len(new_df)} 条")
+                    logging.info(f"数据刷新成功，共 {len(new_df)} 条")
                 else:
-                    print("数据获取为空，跳过更新")
+                    logging.warning("数据获取为空")
             except Exception as e:
-                print(f"后台刷新异常: {e}")
+                logging.error(f"后台刷新异常: {e}")
             
-            # 休息60秒
+            # 休息60秒 (服务器端刷新频率)
             time.sleep(60)
 
     def get_latest_data(self):
-        """前端页面调用的接口，直接返回内存中的数据，0延迟"""
+        """前端读取接口"""
         with self.lock:
-            # 返回数据的副本，防止前端修改影响后台
             return self.raw_data.copy(), self.last_update_time
 
-# 初始化引擎（如果是第一次启动服务器，这里会触发后台线程启动）
+# 初始化引擎
 data_engine = BackgroundMarketEngine()
 
-# --- UI 界面 (保持完全一致) ---
-st.title("🦅 游资捕手 v3.0：光速服务器版")
+# --- UI 界面 ---
+st.title("🦅 游资捕手 v3.2：专属持仓版")
 
 with st.sidebar:
     st.header("⚙️ 1. 选股参数 (买)")
@@ -162,15 +185,21 @@ with st.sidebar:
     min_vol_ratio = st.number_input("最低量比", 1.5)
     
     st.divider()
+    
     st.header("🛡️ 2. 持仓监控 (卖)")
-    user_holdings = st.text_area("持仓代码 (逗号分隔)", value="603256,603986,002938,688795,001301,002837", height=70)
+    st.caption("输入代码，逗号分隔，实时监控主力动向")
+    # --- 这里更新了你的默认持仓代码 ---
+    user_holdings = st.text_area(
+        "持仓代码 (逗号分隔)", 
+        value="603256,603986,002938,688795,001301,002837", 
+        height=70
+    )
     
     st.divider()
-    # 按钮逻辑改变：现在是手动触发页面重绘，读取最新后台数据
+    
     if st.button("🚀 刷新视图 (读取后台最新)", type="primary"):
         st.rerun()
-    
-    # 自动刷新前端页面（可选，让页面每60秒自动变一次，配合后台）
+        
     auto_refresh = st.checkbox("页面自动同步 (每60s)", value=False)
     if auto_refresh:
         time.sleep(60)
@@ -180,25 +209,19 @@ with st.sidebar:
 
 status_placeholder = st.empty()
 
-# 1. 直接从内存引擎获取数据（毫秒级）
+# 1. 直接从内存引擎获取数据
 raw_df, last_time = data_engine.get_latest_data()
 
-# 2. 处理冷启动情况（服务器刚开，后台线程还没跑完第一次）
+# 2. 处理冷启动
 if raw_df.empty:
-    status_placeholder.warning("⏳ 服务器后台正在进行首次数据拉取，请稍等几秒后手动刷新页面...")
-    # 可以选择在这里强制等待一下，或者让用户手动刷
-    time.sleep(1) 
-    st.rerun()
+    status_placeholder.warning("⏳ 服务器启动中，后台正在进行首次数据拉取，请稍等几秒后手动点击刷新...")
 else:
     time_str = last_time.strftime('%H:%M:%S')
-    status_placeholder.success(f"✅ 数据已就绪 (服务器端无需等待) | 后台最后更新: {time_str}")
+    status_placeholder.success(f"✅ 数据已就绪 (Server Cache) | 后台最后更新: {time_str}")
 
-    # Tab 分页
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
-    # --- TAB 1: 狙击买入 (前端极速计算) ---
-    # 注：虽然数据是后台抓的，但筛选（filter）是在前端做的
-    # 因为每个用户在Sidebar调整的参数不同，这部分计算量极小(0.01s)，不会卡顿
+    # --- TAB 1: 狙击买入 ---
     with tab1:
         result_df = YangStrategy.filter_stocks(raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio)
         
@@ -258,6 +281,6 @@ else:
                         </div>
                         """, unsafe_allow_html=True)
             else:
-                st.warning("未找到持仓数据，请检查代码。")
+                st.warning("未找到持仓数据，请检查代码格式。")
         else:
             st.info("请在左侧输入持仓代码以开启监控。")
