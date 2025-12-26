@@ -5,7 +5,7 @@ import time
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v2.0：攻守兼备版",
+    page_title="游资捕手 v2.1：狙击作战版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -16,101 +16,94 @@ class YangStrategy:
     
     @staticmethod
     def get_market_data_with_retry(max_retries=3):
-        """
-        带重试机制的数据获取函数，解决 Timeout 问题
-        """
+        """带重试机制的数据获取"""
         for i in range(max_retries):
             try:
-                # 获取全市场实时行情
                 df = ak.stock_zh_a_spot_em()
-                
-                # 数据清洗
                 df = df.rename(columns={
-                    '代码': 'Symbol',
-                    '名称': 'Name',
-                    '最新价': 'Price',
-                    '涨跌幅': 'Change_Pct',
-                    '换手率': 'Turnover_Rate',
-                    '量比': 'Volume_Ratio',
-                    '总市值': 'Market_Cap',
-                    '最高': 'High',
-                    '最低': 'Low',
-                    '今开': 'Open'
+                    '代码': 'Symbol', '名称': 'Name', '最新价': 'Price',
+                    '涨跌幅': 'Change_Pct', '换手率': 'Turnover_Rate',
+                    '量比': 'Volume_Ratio', '总市值': 'Market_Cap',
+                    '最高': 'High', '最低': 'Low', '今开': 'Open'
                 })
-                
-                # 数值转换
                 cols = ['Price', 'Change_Pct', 'Turnover_Rate', 'Volume_Ratio', 'Market_Cap', 'High', 'Low', 'Open']
                 for col in cols:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
-                
                 return df
             except Exception as e:
                 if i < max_retries - 1:
-                    time.sleep(2) # 失败后冷却2秒再试
+                    time.sleep(2)
                     continue
                 else:
-                    st.toast(f"数据源连接超时，请检查网络或稍后重试: {e}", icon="⚠️")
+                    st.toast(f"连接超时，请重试: {e}", icon="⚠️")
                     return pd.DataFrame()
         return pd.DataFrame()
 
     @staticmethod
+    def calculate_battle_plan(df):
+        """
+        生成作战计划：买入区间、止损价、止盈预期、T+1策略
+        """
+        if df.empty: return df
+        
+        # 1. 建议买入价：杨永兴风格是势能确立后立刻进，但不能追太高
+        # 逻辑：现价即买点，但设定上限为现价+0.5%（防止滑点过大）
+        df['Buy_Price'] = df['Price']
+        
+        # 2. 严格止损价：成本价 - 3%
+        df['Stop_Loss'] = df['Price'] * 0.97
+        
+        # 3. 短线目标价：成本价 + 8% (博弈隔日溢价)
+        df['Target_Price'] = df['Price'] * 1.08
+        
+        # 4. 生成文字版操盘建议
+        def generate_t1_strategy(row):
+            if row['Change_Pct'] > 9.0:
+                return "排板策略: 涨停封死则持有，炸板立即走。"
+            else:
+                return "隔日策略: 明日开盘若不红盘高开，竞价直接走；若高开则持股待涨。"
+        
+        df['Action_Plan'] = df.apply(generate_t1_strategy, axis=1)
+        return df
+
+    @staticmethod
     def check_sell_signals(holdings_df):
-        """
-        杨永兴卖出/风控逻辑：
-        1. 硬止损：日内亏损超过阈值（如 -3%），说明势头不对，不仅没涨反而跌。
-        2. 冲高回落（止盈保护）：从当日最高点回撤超过一定幅度（如 4%），防止利润回吐，主力可能在做T出货。
-        3. 弱势盘整：开盘后一直绿盘，且低于开盘价。
-        """
+        """持仓风控逻辑 (v2.0功能保留)"""
         signals = []
-        if holdings_df.empty:
-            return signals
+        if holdings_df.empty: return pd.DataFrame()
 
         for _, row in holdings_df.iterrows():
             reason = []
             status = "持仓观察"
-            color = "#e6f3ff" # 默认浅蓝
+            color = "#e6f3ff"
             border_color = "#ccc"
 
-            # 逻辑A: 硬止损 (当日大跌)
-            # 杨永兴纪律：买入后不涨反跌，立即砍仓，绝不恋战
             if row['Change_Pct'] < -3.0:
                 status = "🛑 止损卖出"
-                reason.append("触及 -3% 硬止损线，趋势走坏")
-                color = "#ffe6e6" # 浅红警告
-                border_color = "red"
-            
-            # 逻辑B: 冲高回落 (主力出货嫌疑)
-            # 计算回撤：(最高价 - 现价) / 最高价
+                reason.append("触及-3%止损线，不仅没涨反而大跌")
+                color = "#ffe6e6"; border_color = "red"
             elif row['High'] > 0:
                 drawdown = (row['High'] - row['Price']) / row['High'] * 100
                 if row['Change_Pct'] > 0 and drawdown > 4.0:
                     status = "💰 止盈/避险"
-                    reason.append(f"高点回撤 {drawdown:.1f}%，主力疑似出货")
-                    color = "#fff5e6" # 浅橙色
-                    border_color = "orange"
+                    reason.append(f"高点回撤{drawdown:.1f}%，主力疑似出货")
+                    color = "#fff5e6"; border_color = "orange"
                 elif row['Change_Pct'] < 0 and row['Price'] < row['Open']:
-                    # 低开低走或高开低走
                     status = "⚠️ 弱势预警"
-                    reason.append("日内承压，低于开盘价，无攻击意愿")
-                    color = "#ffffcc" # 浅黄
-                    border_color = "#cccc00"
+                    reason.append("水下震荡，低于开盘价")
+                    color = "#ffffcc"; border_color = "#cccc00"
             
             signals.append({
-                "代码": row['Symbol'],
-                "名称": row['Name'],
-                "现价": row['Price'],
-                "涨跌幅": f"{row['Change_Pct']}%",
-                "建议操作": status,
-                "原因": "; ".join(reason) if reason else "趋势尚可，紧盯量能",
-                "Color": color,
-                "Border": border_color
+                "代码": row['Symbol'], "名称": row['Name'], "现价": row['Price'],
+                "涨跌幅": f"{row['Change_Pct']}%", "建议操作": status,
+                "原因": "; ".join(reason) if reason else "趋势正常",
+                "Color": color, "Border": border_color
             })
-        
         return pd.DataFrame(signals)
 
     @staticmethod
     def filter_stocks(df, max_cap, min_turnover, min_change, max_change, min_vol_ratio):
-        """选股逻辑（保持不变）"""
+        """选股逻辑"""
         if df.empty: return df
         df['Market_Cap_Billions'] = df['Market_Cap'] / 100000000
         filtered = df[
@@ -120,120 +113,125 @@ class YangStrategy:
             (df['Change_Pct'] <= max_change) &
             (df['Volume_Ratio'] >= min_vol_ratio)
         ]
-        return filtered.sort_values(by='Turnover_Rate', ascending=False)
+        # 计算作战计划
+        return YangStrategy.calculate_battle_plan(filtered).sort_values(by='Turnover_Rate', ascending=False)
 
-# --- UI 界面构建 ---
+# --- UI 界面 ---
+st.title("🦅 游资捕手 v2.1：狙击作战版")
 
-st.title("🦅 游资捕手 v2.0：攻守兼备版")
-
-# 侧边栏：参数与持仓
 with st.sidebar:
-    st.header("⚙️ 1. 选股雷达 (买入)")
+    st.header("⚙️ 1. 选股参数 (买)")
     max_cap = st.slider("最大市值 (亿)", 50, 500, 200)
     min_turnover = st.slider("最低换手 (%)", 1.0, 15.0, 5.0)
-    col_s1, col_s2 = st.columns(2)
-    min_change = col_s1.number_input("涨幅下限 (%)", 2.0)
-    max_change = col_s2.number_input("涨幅上限 (%)", 8.0)
+    col1, col2 = st.columns(2)
+    min_change = col1.number_input("涨幅下限", 2.0)
+    max_change = col2.number_input("涨幅上限", 8.5)
     min_vol_ratio = st.number_input("最低量比", 1.5)
-
-    st.divider()
-    
-    st.header("🛡️ 2. 持仓监控 (卖出)")
-    st.caption("输入你的持仓代码(逗号分隔)检测风险")
-    user_holdings = st.text_area("持仓代码", value="600519,300059,000001", height=70, help="输入例如：000001, 600519")
     
     st.divider()
-    # 增加手动刷新按钮的显眼程度
-    if st.button("🚀 刷新全市场数据", type="primary"):
+    st.header("🛡️ 2. 持仓监控 (卖)")
+    user_holdings = st.text_area("持仓代码 (逗号分隔)", value="000001,600519", height=70)
+    
+    st.divider()
+    if st.button("🚀 启动全市场扫描", type="primary"):
         st.cache_data.clear()
 
-# --- 主逻辑 ---
-
-# 1. 获取数据 (增加重试Loading效果)
+# --- 主程序 ---
 status_placeholder = st.empty()
-status_placeholder.info("⏳ 正在连接交易所接口，下载全市场数据... (若网络波动会自动重试)")
+status_placeholder.info("⏳ 连接交易所数据中... (自动重试机制已开启)")
 
 raw_df = YangStrategy.get_market_data_with_retry()
 
 if not raw_df.empty:
-    status_placeholder.success(f"✅ 数据更新成功! 扫描股票: {len(raw_df)} 只")
-    
-    # ----------------------
-    # 模块一：持仓风控 (卖出信号)
-    # ----------------------
-    st.subheader("🛡️ 持仓风控雷达 (Sell Signals)")
-    
-    holding_codes = [code.strip() for code in user_holdings.split(',') if code.strip()]
-    
-    if holding_codes:
-        # 从全市场数据中筛选出持仓股
-        # 注意：需要确保代码格式匹配，A股代码通常是6位数字
-        my_stocks = raw_df[raw_df['Symbol'].isin(holding_codes)]
+    status_placeholder.success(f"✅ 市场扫描完毕 | 股票总数: {len(raw_df)}")
+
+    # Tab 分页：让买和卖的逻辑更清晰
+    tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
+
+    # --- TAB 1: 狙击买入 ---
+    with tab1:
+        result_df = YangStrategy.filter_stocks(raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio)
         
-        if not my_stocks.empty:
-            sell_signals = YangStrategy.check_sell_signals(my_stocks)
+        if len(result_df) > 0:
+            st.markdown(f"### 🎯 发现 {len(result_df)} 个潜在爆发标的")
+            st.caption("建议操作：现价买入，严格执行下方生成的止损价。")
             
-            # 使用卡片式布局展示卖出信号，更直观
-            cols = st.columns(len(sell_signals) if len(sell_signals) < 4 else 3)
-            for index, row in sell_signals.iterrows():
-                # 动态计算展示颜色
-                col_idx = index % 3
-                with cols[col_idx]:
-                    st.markdown(f"""
-                    <div style="
-                        background-color: {row['Color']}; 
-                        border:1px solid {row['Border']}; 
-                        padding:15px; 
-                        border-radius:8px; 
-                        margin-bottom:10px;
-                        box-shadow: 2px 2px 5px rgba(0,0,0,0.1);
-                    ">
-                        <div style="font-size:1.1em; font-weight:bold;">{row['名称']} <span style="font-size:0.8em; color:#666">({row['代码']})</span></div>
-                        <div style="margin-top:5px;">现价: ¥{row['现价']} <span style="font-weight:bold; color:{'red' if '-' not in row['涨跌幅'] else 'green'}">{row['涨跌幅']}</span></div>
-                        <hr style="margin:8px 0; border-top: 1px dashed #999;">
-                        <div style="font-weight:bold; color: #333;">信号: {row['建议操作']}</div>
-                        <div style="font-size:0.85em; color:#555; margin-top:2px;">{row['原因']}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
+            # 核心数据展示
+            st.dataframe(
+                result_df[[
+                    'Symbol', 'Name', 'Price', 'Change_Pct', 
+                    'Buy_Price', 'Stop_Loss', 'Target_Price', 'Action_Plan',
+                    'Turnover_Rate', 'Volume_Ratio'
+                ]],
+                column_config={
+                    "Symbol": "代码", 
+                    "Name": "名称",
+                    "Price": st.column_config.NumberColumn("现价", format="¥%.2f"),
+                    "Change_Pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
+                    
+                    # 新增核心作战列
+                    "Buy_Price": st.column_config.NumberColumn(
+                        "建议买入", 
+                        help="建议在此价格附近直接挂单扫货",
+                        format="¥%.2f"
+                    ),
+                    "Stop_Loss": st.column_config.NumberColumn(
+                        "🛑 止损价", 
+                        help="跌破此价格必须无条件止损 (-3%)",
+                        format="¥%.2f"
+                    ),
+                    "Target_Price": st.column_config.NumberColumn(
+                        "🎯 目标价", 
+                        help="短期第一止盈目标位",
+                        format="¥%.2f"
+                    ),
+                    "Action_Plan": st.column_config.TextColumn(
+                        "📋 后续操盘建议",
+                        width="medium"
+                    ),
+                    
+                    "Turnover_Rate": st.column_config.ProgressColumn("换手", format="%.1f%%", min_value=0, max_value=20),
+                    "Volume_Ratio": st.column_config.NumberColumn("量比", format="%.1f")
+                },
+                hide_index=True,
+                use_container_width=True
+            )
             
-            # 提示未找到的股票
-            found_codes = my_stocks['Symbol'].tolist()
-            not_found = set(holding_codes) - set(found_codes)
-            if not_found:
-                st.caption(f"注：部分代码未获取到数据，请检查拼写: {', '.join(not_found)}")
+            # 重点票详细卡片
+            if not result_df.empty:
+                best_pick = result_df.iloc[0]
+                st.info(f"""
+                **🔥 重点关注：{best_pick['Name']} ({best_pick['Symbol']})** * **买入逻辑：** 量比 {best_pick['Volume_Ratio']} + 换手 {best_pick['Turnover_Rate']}%，资金攻击意愿最强。
+                * **执行纪律：** 现价 **¥{best_pick['Price']}** 买入，若跌破 **¥{best_pick['Stop_Loss']:.2f}** 立即砍仓。
+                * **T+1 剧本：** {best_pick['Action_Plan']}
+                """)
         else:
-            st.warning("未找到持仓股票数据。请检查代码是否正确（如 600xxx, 00xxxx, 30xxxx）。")
-    else:
-        st.info("👈 请在左侧侧边栏输入持仓代码，开启风控监控。")
+            st.warning("当前没有符合【杨永兴战法】的标的。市场可能处于冰点，建议空仓休息。")
 
-    st.divider()
-
-    # ----------------------
-    # 模块二：选股池 (买入信号)
-    # ----------------------
-    st.subheader("🦅 游资狙击池 (Buy Signals)")
-    st.caption("基于杨永兴选股逻辑：小盘、高换手、量比放大、即时强势。")
-    
-    result_df = YangStrategy.filter_stocks(
-        raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio
-    )
-    
-    if len(result_df) > 0:
-        st.dataframe(
-            result_df[['Symbol', 'Name', 'Price', 'Change_Pct', 'Turnover_Rate', 'Volume_Ratio', 'Market_Cap_Billions']],
-            column_config={
-                "Symbol": "代码", "Name": "名称",
-                "Price": st.column_config.NumberColumn("现价", format="¥%.2f"),
-                "Change_Pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
-                "Turnover_Rate": st.column_config.ProgressColumn("换手率", format="%.2f%%", min_value=0, max_value=20),
-                "Volume_Ratio": st.column_config.NumberColumn("量比", format="%.2f"),
-                "Market_Cap_Billions": st.column_config.NumberColumn("市值(亿)", format="%.1f")
-            },
-            hide_index=True,
-            use_container_width=True
-        )
-    else:
-        st.info("当前无符合杨永兴严格策略的标的。建议：\n1. 市场可能处于冰点期，休息也是一种策略。\n2. 尝试在左侧降低换手率或量比要求。")
+    # --- TAB 2: 风控卖出 ---
+    with tab2:
+        holding_codes = [c.strip() for c in user_holdings.split(',') if c.strip()]
+        if holding_codes:
+            my_stocks = raw_df[raw_df['Symbol'].isin(holding_codes)]
+            if not my_stocks.empty:
+                sell_signals = YangStrategy.check_sell_signals(my_stocks)
+                
+                cols = st.columns(3)
+                for i, row in sell_signals.iterrows():
+                    with cols[i % 3]:
+                        st.markdown(f"""
+                        <div style="background-color:{row['Color']}; border:1px solid {row['Border']}; padding:15px; border-radius:8px; margin-bottom:10px;">
+                            <b>{row['名称']} ({row['代码']})</b><br>
+                            现价: {row['现价']} <span style="color:{'red' if '-' not in row['涨跌幅'] else 'green'}">({row['涨跌幅']})</span>
+                            <hr style="margin:5px 0">
+                            <b>建议: {row['建议操作']}</b><br>
+                            <small>{row['原因']}</small>
+                        </div>
+                        """, unsafe_allow_html=True)
+            else:
+                st.warning("未找到持仓数据，请检查代码格式。")
+        else:
+            st.info("请在左侧输入持仓代码以开启监控。")
 
 else:
-    status_placeholder.error("❌ 数据获取最终失败。可能是接口临时维护或网络限制。")
+    status_placeholder.error("❌ 数据获取失败。请检查网络连接（VPN等）或稍后再试。")
