@@ -2,202 +2,216 @@ import streamlit as st
 import pandas as pd
 import akshare as ak
 import time
-from datetime import datetime
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手：杨永兴策略复刻版",
-    page_icon="📈",
+    page_title="游资捕手 v2.0：攻守兼备版",
+    page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
 # --- 核心策略逻辑封装 ---
 class YangStrategy:
-    """
-    杨永兴策略核心类：
-    1. 聚焦热点与流动性 (高换手)
-    2. 捕捉启动瞬间 (量比 + 涨幅)
-    3. 小盘灵活 (市值控制)
-    """
     
     @staticmethod
-    @st.cache_data(ttl=60) # 缓存60秒，避免接口请求过于频繁
-    def get_market_data():
-        """获取A股实时行情数据"""
-        try:
-            # 使用 akshare 获取东方财富实时行情
-            df = ak.stock_zh_a_spot_em()
-            
-            # 数据清洗与重命名，方便阅读
-            df = df.rename(columns={
-                '代码': 'Symbol',
-                '名称': 'Name',
-                '最新价': 'Price',
-                '涨跌幅': 'Change_Pct',
-                '换手率': 'Turnover_Rate',
-                '量比': 'Volume_Ratio',
-                '总市值': 'Market_Cap',
-                '成交量': 'Volume',
-                '最高': 'High',
-                '最低': 'Low'
-            })
-            
-            # 转换数值类型
-            cols = ['Price', 'Change_Pct', 'Turnover_Rate', 'Volume_Ratio', 'Market_Cap']
-            for col in cols:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+    def get_market_data_with_retry(max_retries=3):
+        """
+        带重试机制的数据获取函数，解决 Timeout 问题
+        """
+        for i in range(max_retries):
+            try:
+                # 获取全市场实时行情
+                df = ak.stock_zh_a_spot_em()
                 
-            return df
-        except Exception as e:
-            st.error(f"数据获取失败，请检查网络或源接口: {e}")
-            return pd.DataFrame()
+                # 数据清洗
+                df = df.rename(columns={
+                    '代码': 'Symbol',
+                    '名称': 'Name',
+                    '最新价': 'Price',
+                    '涨跌幅': 'Change_Pct',
+                    '换手率': 'Turnover_Rate',
+                    '量比': 'Volume_Ratio',
+                    '总市值': 'Market_Cap',
+                    '最高': 'High',
+                    '最低': 'Low',
+                    '今开': 'Open'
+                })
+                
+                # 数值转换
+                cols = ['Price', 'Change_Pct', 'Turnover_Rate', 'Volume_Ratio', 'Market_Cap', 'High', 'Low', 'Open']
+                for col in cols:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                
+                return df
+            except Exception as e:
+                if i < max_retries - 1:
+                    time.sleep(2) # 失败后冷却2秒再试
+                    continue
+                else:
+                    st.toast(f"数据源连接超时，请检查网络或稍后重试: {e}", icon="⚠️")
+                    return pd.DataFrame()
+        return pd.DataFrame()
+
+    @staticmethod
+    def check_sell_signals(holdings_df):
+        """
+        杨永兴卖出/风控逻辑：
+        1. 硬止损：亏损超过阈值（如 -3%）
+        2. 冲高回落（止盈）：从当日最高点回撤超过一定幅度（如 3%），说明主力在大卖
+        3. 弱势盘整：开盘后一直绿盘
+        """
+        signals = []
+        if holdings_df.empty:
+            return signals
+
+        for _, row in holdings_df.iterrows():
+            reason = []
+            status = "持仓"
+            color = "gray"
+
+            # 逻辑A: 硬止损 (当日大跌)
+            # 杨永兴纪律：买入后不涨反跌，立即砍仓
+            if row['Change_Pct'] < -3.0:
+                status = "🛑 止损卖出"
+                reason.append("触及 -3% 硬止损线")
+                color = "red"
+            
+            # 逻辑B: 冲高回落 (主力出货)
+            # 计算回撤：(最高价 - 现价) / 最高价
+            elif row['High'] > 0:
+                drawdown = (row['High'] - row['Price']) / row['High'] * 100
+                if row['Change_Pct'] > 0 and drawdown > 4.0:
+                    status = "💰 止盈撤退"
+                    reason.append(f"高点回撤 {drawdown:.1f}%，主力可能在出货")
+                    color = "orange"
+                elif row['Change_Pct'] < 0 and row['Open'] > row['Price']:
+                    # 低开低走或高开低走
+                    status = "⚠️ 弱势预警"
+                    reason.append("日内承压，甚至低于开盘价")
+                    color = "yellow"
+            
+            signals.append({
+                "代码": row['Symbol'],
+                "名称": row['Name'],
+                "现价": row['Price'],
+                "涨跌幅": f"{row['Change_Pct']}%",
+                "建议操作": status,
+                "原因": "; ".join(reason) if reason else "趋势正常",
+                "Color": color
+            })
+        
+        return pd.DataFrame(signals)
 
     @staticmethod
     def filter_stocks(df, max_cap, min_turnover, min_change, max_change, min_vol_ratio):
-        """执行杨永兴筛选逻辑"""
-        if df.empty:
-            return df
-        
-        # 1. 市值过滤 (杨永兴偏好中小盘，便于拉升)
-        # 转换单位：Market_Cap 通常单位是元，我们需要转为亿
+        """选股逻辑（保持不变）"""
+        if df.empty: return df
         df['Market_Cap_Billions'] = df['Market_Cap'] / 100000000
-        filtered = df[df['Market_Cap_Billions'] <= max_cap]
-        
-        # 2. 活跃度过滤 (换手率是灵魂)
-        filtered = filtered[filtered['Turnover_Rate'] >= min_turnover]
-        
-        # 3. 势能过滤 (捕捉主升浪，去除全天趴窝的，也去除已经涨停买不进的)
-        filtered = filtered[
-            (filtered['Change_Pct'] >= min_change) & 
-            (filtered['Change_Pct'] <= max_change)
+        filtered = df[
+            (df['Market_Cap_Billions'] <= max_cap) &
+            (df['Turnover_Rate'] >= min_turnover) &
+            (df['Change_Pct'] >= min_change) & 
+            (df['Change_Pct'] <= max_change) &
+            (df['Volume_Ratio'] >= min_vol_ratio)
         ]
-        
-        # 4. 量能过滤 (量比放大，说明主力介入)
-        # 注意：部分新股或异常数据量比可能为空
-        filtered = filtered[filtered['Volume_Ratio'] >= min_vol_ratio]
-        
-        # 5. 排序：按换手率降序，优先展示最活跃的
         return filtered.sort_values(by='Turnover_Rate', ascending=False)
 
 # --- UI 界面构建 ---
 
-# 标题区
-st.title("🦅 游资捕手：杨永兴短线策略系统")
-st.markdown("""
-> **设计理念：** 基于杨永兴“16个月100倍”的核心逻辑——**唯快不破，流动性为王**。
-> 本工具旨在通过实时数据清洗，捕捉当前市场中资金关注度最高、具备爆发潜力的中小盘个股。
-""")
+st.title("🦅 游资捕手 v2.0：攻守兼备版")
 
-st.divider()
-
-# 侧边栏：策略参数配置 (PM思维：让用户拥有控制权)
+# 侧边栏：参数与持仓
 with st.sidebar:
-    st.header("⚙️ 策略参数微调")
-    
-    st.subheader("1. 盘子大小 (市值)")
-    max_cap = st.slider("最大市值 (亿元)", 50, 1000, 200, help="杨永兴偏好小盘股，通常200亿以下弹性最好。")
-    
-    st.subheader("2. 市场热度 (换手率)")
-    min_turnover = st.slider("最低换手率 (%)", 1.0, 20.0, 5.0, help="低于5%的股票通常不在短线猎人视野内。")
-    
-    st.subheader("3. 进攻信号 (涨跌幅)")
-    col1, col2 = st.columns(2)
-    with col1:
-        min_change = st.number_input("最低涨幅 (%)", value=2.5)
-    with col2:
-        max_change = st.number_input("最高涨幅 (%)", value=8.5, help="避开已经涨停的，在这个区间追入盈亏比最佳。")
-        
-    st.subheader("4. 爆发力 (量比)")
-    min_vol_ratio = st.number_input("最低量比", value=1.5, step=0.1, help="量比>1.5说明今日成交量显著放大。")
+    st.header("⚙️ 1. 选股雷达 (买入)")
+    max_cap = st.slider("最大市值 (亿)", 50, 500, 200)
+    min_turnover = st.slider("最低换手 (%)", 1.0, 15.0, 5.0)
+    col_s1, col_s2 = st.columns(2)
+    min_change = col_s1.number_input("涨幅下限 (%)", 2.0)
+    max_change = col_s2.number_input("涨幅上限 (%)", 8.0)
+    min_vol_ratio = st.number_input("最低量比", 1.5)
 
-    st.markdown("---")
-    auto_refresh = st.checkbox("开启自动刷新 (每60秒)", value=False)
+    st.divider()
     
-    if st.button("🚀 立即扫描全市场"):
-        st.cache_data.clear() # 清除缓存强制刷新
+    st.header("🛡️ 2. 持仓监控 (卖出)")
+    st.caption("输入代码(逗号分隔)检测卖出信号")
+    user_holdings = st.text_area("持仓代码", value="600519,000001", height=70)
+    
+    st.divider()
+    if st.button("🚀 刷新全市场数据", type="primary"):
+        st.cache_data.clear()
 
-# 自动刷新逻辑
-if auto_refresh:
-    time.sleep(60)
-    st.rerun()
+# --- 主逻辑 ---
 
-# --- 主逻辑执行 ---
+# 1. 获取数据 (增加重试Loading效果)
+status_placeholder = st.empty()
+status_placeholder.info("⏳ 正在连接交易所接口，下载全市场数据...")
 
-# 1. 获取数据
-with st.spinner('正在连接交易所数据接口，扫描全市场5000+只股票...'):
-    raw_df = YangStrategy.get_market_data()
+raw_df = YangStrategy.get_market_data_with_retry()
 
 if not raw_df.empty:
-    # 2. 市场概览
-    st.subheader("📊 实时市场情绪")
-    metric_col1, metric_col2, metric_col3 = st.columns(3)
+    status_placeholder.success(f"✅ 数据更新成功! 扫描股票: {len(raw_df)} 只")
     
-    up_count = len(raw_df[raw_df['Change_Pct'] > 0])
-    down_count = len(raw_df[raw_df['Change_Pct'] < 0])
-    limit_up_count = len(raw_df[raw_df['Change_Pct'] > 9.8]) # 粗略估计涨停
+    # ----------------------
+    # 模块一：持仓风控 (卖出信号)
+    # ----------------------
+    st.subheader("🛡️ 持仓风控雷达 (Sell Signals)")
     
-    metric_col1.metric("上涨家数", f"{up_count}", delta="多头力量")
-    metric_col2.metric("下跌家数", f"{down_count}", delta_color="inverse")
-    metric_col3.metric("涨停(>9.8%)", f"{limit_up_count}", "市场极致热度")
+    holding_codes = [code.strip() for code in user_holdings.split(',') if code.strip()]
+    if holding_codes:
+        # 从全市场数据中筛选出持仓股
+        my_stocks = raw_df[raw_df['Symbol'].isin(holding_codes)]
+        
+        if not my_stocks.empty:
+            sell_signals = YangStrategy.check_sell_signals(my_stocks)
+            
+            # 使用列布局展示卡片式信号
+            cols = st.columns(len(sell_signals))
+            for index, row in sell_signals.iterrows():
+                # 动态计算展示颜色
+                bg_color = "green" if "正常" in row['原因'] else ("red" if "止损" in row['建议操作'] else "orange")
+                
+                with st.container():
+                    st.markdown(f"""
+                    <div style="border:1px solid #ddd; padding:10px; border-radius:5px; border-left: 5px solid {row['Color']}; margin-bottom:10px;">
+                        <strong>{row['名称']} ({row['代码']})</strong><br>
+                        现价: ¥{row['现价']} <span style="color:{'red' if float(row['涨跌幅'][:-1])>0 else 'green'}">({row['涨跌幅']})</span><br>
+                        <hr style="margin:5px 0;">
+                        信号: <b>{row['建议操作']}</b><br>
+                        <span style="font-size:0.8em; color:#666">{row['原因']}</span>
+                    </div>
+                    """, unsafe_allow_html=True)
+        else:
+            st.warning("未找到持仓股票数据，请检查代码是否正确（如 600xxx, 00xxxx）。")
+    else:
+        st.info("请在左侧侧边栏输入持仓代码，开启风控监控。")
 
-    # 3. 执行筛选
+    st.divider()
+
+    # ----------------------
+    # 模块二：选股池 (买入信号)
+    # ----------------------
+    st.subheader("🦅 游资狙击池 (Buy Signals)")
+    
     result_df = YangStrategy.filter_stocks(
         raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio
     )
     
-    # 4. 结果展示
-    st.subheader(f"🎯 策略命中目标 ({len(result_df)} 只)")
-    
     if len(result_df) > 0:
-        # 格式化展示表格
         st.dataframe(
             result_df[['Symbol', 'Name', 'Price', 'Change_Pct', 'Turnover_Rate', 'Volume_Ratio', 'Market_Cap_Billions']],
             column_config={
-                "Symbol": "代码",
-                "Name": "名称",
+                "Symbol": "代码", "Name": "名称",
                 "Price": st.column_config.NumberColumn("现价", format="¥%.2f"),
-                "Change_Pct": st.column_config.NumberColumn(
-                    "涨跌幅 (%)", 
-                    format="%.2f%%",
-                    help="当日涨跌幅"
-                ),
-                "Turnover_Rate": st.column_config.ProgressColumn(
-                    "换手率 (%)",
-                    format="%.2f%%",
-                    min_value=0,
-                    max_value=20,
-                    help="越高越活跃"
-                ),
-                "Volume_Ratio": st.column_config.NumberColumn("量比", format="%.2f"),
-                "Market_Cap_Billions": st.column_config.NumberColumn("市值 (亿)", format="%.2f"),
+                "Change_Pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
+                "Turnover_Rate": st.column_config.ProgressColumn("换手率", format="%.2f%%", min_value=0, max_value=20),
+                "Market_Cap_Billions": st.column_config.NumberColumn("市值(亿)", format="%.1f")
             },
-            use_container_width=True,
-            hide_index=True
+            hide_index=True,
+            use_container_width=True
         )
-        
-        # 5. 重点标的详情 (Top 3)
-        st.markdown("### 🔥 重点关注 (Top 3)")
-        top_picks = result_df.head(3)
-        cols = st.columns(3)
-        for i, (index, row) in enumerate(top_picks.iterrows()):
-            with cols[i]:
-                st.info(f"**{row['Name']}** ({row['Symbol']})")
-                st.write(f"涨幅: **{row['Change_Pct']}%**")
-                st.write(f"换手: **{row['Turnover_Rate']}%**")
-                st.write(f"量比: **{row['Volume_Ratio']}**")
-                st.caption("符合 '量价齐升' 形态")
-
     else:
-        st.warning("当前没有符合严格策略的标的。建议：1. 降低换手率要求；2. 放宽涨幅区间；3. 等待市场活跃度回升。")
-else:
-    st.error("无法获取市场数据，请稍后再试。")
+        st.info("当前无符合杨永兴严格策略的标的，建议等待盘中异动。")
 
-# --- 风险提示 ---
-st.divider()
-st.caption("""
-**风险提示与免责声明：**
-1. **数据延迟：** 本工具使用开源数据接口，可能存在秒级或分钟级延迟，不作为即时交易依据。
-2. **策略局限：** 杨永兴策略属于高风险超短线策略，极其依赖盘感和卖出纪律（止损）。
-3. **切勿盲从：** 筛选出的股票仅供复盘研究，不构成投资建议。股市有风险，入市需谨慎。
-""")
+else:
+    status_placeholder.error("❌ 数据获取最终失败。请检查：1. 是否开启了VPN（可能导致无法连接国内接口）；2. 网络是否通畅。建议点击左侧按钮重试。")
