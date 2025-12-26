@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v3.5：风控合体版",
+    page_title="游资捕手 v3.6：精简实战版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -43,22 +43,22 @@ class YangStrategy:
     @staticmethod
     def calculate_battle_plan(df):
         if df.empty: return df
+        # 1. 建议买入：现价
         df['Buy_Price'] = df['Price']
+        # 2. 止损价：-3%
         df['Stop_Loss'] = df['Price'] * 0.97
+        # 3. 建议卖出价 (止盈)：+8%
         df['Target_Price'] = df['Price'] * 1.08
         
-        # --- 新增：为买入池计算风控状态 ---
+        # 风控雷达逻辑
         def assess_risk_for_buyers(row):
-            # 1. 计算回撤幅度
             drawdown = 0
             if row['High'] > 0:
                 drawdown = (row['High'] - row['Price']) / row['High'] * 100
             
-            # 2. 判断逻辑
             if row['Change_Pct'] > 9.0:
                 return "🔥 强势封板"
             elif drawdown > 4.0:
-                # 虽然涨幅符合，但回撤太大，属于“钓鱼波”
                 return "⚠️ 冲高回落(慎追)"
             elif row['Price'] < row['Open']:
                 return "⚠️ 假阴线(需观察)"
@@ -66,15 +66,6 @@ class YangStrategy:
                 return "🟢 趋势向上(可击)"
 
         df['Risk_Advice'] = df.apply(assess_risk_for_buyers, axis=1)
-        
-        # 操盘剧本
-        def generate_t1_strategy(row):
-            if row['Change_Pct'] > 9.0:
-                return "排板策略: 封死持有，炸板走。"
-            else:
-                return "隔日策略: 竞价不红盘则走。"
-        
-        df['Action_Plan'] = df.apply(generate_t1_strategy, axis=1)
         return df
 
     @staticmethod
@@ -163,7 +154,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- UI 界面 ---
-st.title("🦅 游资捕手 v3.5：风控合体版")
+st.title("🦅 游资捕手 v3.6：精简实战版")
 
 with st.sidebar:
     st.header("⚙️ 1. 选股参数 (买)")
@@ -198,19 +189,27 @@ if not raw_df.empty:
 
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
-    # --- TAB 1: 狙击买入 (新增风控列) ---
+    # --- TAB 1: 狙击买入 (已更新) ---
     with tab1:
         result_df = YangStrategy.filter_stocks(raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio)
         
         if len(result_df) > 0:
             st.markdown(f"### 🎯 发现 {len(result_df)} 个标的")
-            st.caption("⚡ **风控雷达说明**：即使进入选股池，若显示'⚠️ 冲高回落'，说明该股从高点回撤过大，请勿追高。")
+            
+            # --- 统一展示操作建议 (替代原本表格里的重复列) ---
+            st.info("""
+            📋 **杨永兴操盘铁律 (通用剧本)：**
+            1. **买入后**：若当日封死涨停，则持有；若炸板，立即走人。
+            2. **隔日卖出**：明日集合竞价若**不红盘高开**，开盘直接清仓；若高开，则持股待涨至目标价。
+            """)
             
             st.dataframe(
                 result_df[[
                     'Symbol', 'Name', 'Price', 'Change_Pct', 
-                    'Risk_Advice',  # <--- 新增列放在显眼位置
-                    'Buy_Price', 'Stop_Loss', 'Action_Plan',
+                    'Risk_Advice',     # 风控
+                    'Buy_Price', 
+                    'Target_Price',    # 建议卖出 (新加回来的)
+                    'Stop_Loss', 
                     'Turnover_Rate', 'Volume_Ratio'
                 ]],
                 column_config={
@@ -218,16 +217,19 @@ if not raw_df.empty:
                     "Price": st.column_config.NumberColumn("现价", format="¥%.2f"),
                     "Change_Pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
                     
-                    # 新增列配置
-                    "Risk_Advice": st.column_config.TextColumn(
-                        "⚡ 实时风控",
-                        help="🟢=安全; ⚠️=冲高回落(主力出货嫌疑)",
-                        width="medium"
-                    ),
+                    "Risk_Advice": st.column_config.TextColumn("⚡ 实时风控", width="medium"),
                     
                     "Buy_Price": st.column_config.NumberColumn("建议买入", format="¥%.2f"),
+                    
+                    # --- 恢复建议卖出列 ---
+                    "Target_Price": st.column_config.NumberColumn(
+                        "🎯 建议卖出", 
+                        format="¥%.2f",
+                        help="短线第一止盈目标位 (+8%)"
+                    ),
+                    
                     "Stop_Loss": st.column_config.NumberColumn("🛑 止损价", format="¥%.2f"),
-                    "Action_Plan": st.column_config.TextColumn("📋 操盘建议", width="medium"),
+                    
                     "Turnover_Rate": st.column_config.ProgressColumn("换手", format="%.1f%%", min_value=0, max_value=20),
                     "Volume_Ratio": st.column_config.NumberColumn("量比", format="%.1f")
                 },
