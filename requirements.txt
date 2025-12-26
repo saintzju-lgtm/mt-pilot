@@ -1,6 +1,19 @@
-streamlit
-akshare
-pandas
-numpy
-scikit-learn
-plotly
+# 核心Web框架（Streamlit）
+streamlit==1.35.0
+
+# 免费财经数据接口（无Token）
+akshare==1.10.94
+
+# 数据处理核心库
+pandas==2.2.2
+numpy==1.26.4
+
+# 可视化库（K线/柱状图）
+plotly==5.22.0
+
+# 桌面通知功能
+plyer==2.1.0
+
+# 可选：解决部分系统的编码/时间处理问题
+python-dateutil==2.9.0.post0
+pytz==2024.1
