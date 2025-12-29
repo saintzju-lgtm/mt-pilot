@@ -3,11 +3,20 @@ import pandas as pd
 import akshare as ak
 import time
 import threading
+import ssl # 引入 SSL 模块
 from datetime import datetime, timedelta, timezone
+
+# --- 核心修复：绕过 SSL 验证 (解决部分网络 ReadTimeout 问题) ---
+try:
+    _create_unverified_https_context = ssl._create_unverified_context
+except AttributeError:
+    pass
+else:
+    ssl._create_default_https_context = _create_unverified_https_context
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v3.6：精简实战版",
+    page_title="游资捕手 v3.7：网络增强版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -18,10 +27,13 @@ class YangStrategy:
     
     @staticmethod
     def get_market_data_silent(max_retries=3):
-        """绝对静默版数据获取"""
+        """绝对静默版数据获取 - 增强网络稳定性"""
         for i in range(max_retries):
             try:
+                # 获取数据
                 df = ak.stock_zh_a_spot_em()
+                
+                # 数据清洗
                 df = df.rename(columns={
                     '代码': 'Symbol', '名称': 'Name', '最新价': 'Price',
                     '涨跌幅': 'Change_Pct', '换手率': 'Turnover_Rate',
@@ -33,21 +45,20 @@ class YangStrategy:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                 return df, None
             except Exception as e:
+                # 遇到错误，休息时间随重试次数增加 (3s, 6s, 9s)
+                sleep_time = (i + 1) * 3
                 if i < max_retries - 1:
-                    time.sleep(2)
+                    time.sleep(sleep_time)
                     continue
                 else:
                     return pd.DataFrame(), str(e)
-        return pd.DataFrame(), "未知错误"
+        return pd.DataFrame(), "网络请求最终失败"
 
     @staticmethod
     def calculate_battle_plan(df):
         if df.empty: return df
-        # 1. 建议买入：现价
         df['Buy_Price'] = df['Price']
-        # 2. 止损价：-3%
         df['Stop_Loss'] = df['Price'] * 0.97
-        # 3. 建议卖出价 (止盈)：+8%
         df['Target_Price'] = df['Price'] * 1.08
         
         # 风控雷达逻辑
@@ -141,6 +152,8 @@ class BackgroundEngine:
             except Exception as e:
                 with self.lock:
                     self.last_error = f"Loop Crash: {str(e)}"
+            
+            # 服务器端刷新频率：60秒
             time.sleep(60)
 
     def get_data(self):
@@ -154,7 +167,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- UI 界面 ---
-st.title("🦅 游资捕手 v3.6：精简实战版")
+st.title("🦅 游资捕手 v3.7：网络增强版")
 
 with st.sidebar:
     st.header("⚙️ 1. 选股参数 (买)")
@@ -180,23 +193,22 @@ with st.sidebar:
 status_placeholder = st.empty()
 raw_df, last_time, last_error = data_engine.get_data()
 
+# 判断逻辑：如果数据为空，说明正在冷启动或完全挂了
 if not raw_df.empty:
     time_str = last_time.strftime('%H:%M:%S')
     if last_error:
-        status_placeholder.warning(f"⚠️ 数据展示中 (北京时间 {time_str})，后台报错: {last_error}")
+        status_placeholder.warning(f"⚠️ 数据展示中 (缓存 {time_str}) | 后台最新尝试失败: {last_error}")
     else:
         status_placeholder.success(f"✅ 数据状态健康 | 更新时间: {time_str} (北京时间)")
 
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
-    # --- TAB 1: 狙击买入 (已更新) ---
+    # --- TAB 1: 狙击买入 ---
     with tab1:
         result_df = YangStrategy.filter_stocks(raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio)
         
         if len(result_df) > 0:
             st.markdown(f"### 🎯 发现 {len(result_df)} 个标的")
-            
-            # --- 统一展示操作建议 (替代原本表格里的重复列) ---
             st.info("""
             📋 **杨永兴操盘铁律 (通用剧本)：**
             1. **买入后**：若当日封死涨停，则持有；若炸板，立即走人。
@@ -206,30 +218,18 @@ if not raw_df.empty:
             st.dataframe(
                 result_df[[
                     'Symbol', 'Name', 'Price', 'Change_Pct', 
-                    'Risk_Advice',     # 风控
-                    'Buy_Price', 
-                    'Target_Price',    # 建议卖出 (新加回来的)
-                    'Stop_Loss', 
+                    'Risk_Advice', 'Buy_Price', 
+                    'Target_Price', 'Stop_Loss', 
                     'Turnover_Rate', 'Volume_Ratio'
                 ]],
                 column_config={
                     "Symbol": "代码", "Name": "名称",
                     "Price": st.column_config.NumberColumn("现价", format="¥%.2f"),
                     "Change_Pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
-                    
                     "Risk_Advice": st.column_config.TextColumn("⚡ 实时风控", width="medium"),
-                    
                     "Buy_Price": st.column_config.NumberColumn("建议买入", format="¥%.2f"),
-                    
-                    # --- 恢复建议卖出列 ---
-                    "Target_Price": st.column_config.NumberColumn(
-                        "🎯 建议卖出", 
-                        format="¥%.2f",
-                        help="短线第一止盈目标位 (+8%)"
-                    ),
-                    
+                    "Target_Price": st.column_config.NumberColumn("🎯 建议卖出", format="¥%.2f", help="短线第一止盈目标位 (+8%)"),
                     "Stop_Loss": st.column_config.NumberColumn("🛑 止损价", format="¥%.2f"),
-                    
                     "Turnover_Rate": st.column_config.ProgressColumn("换手", format="%.1f%%", min_value=0, max_value=20),
                     "Volume_Ratio": st.column_config.NumberColumn("量比", format="%.1f")
                 },
@@ -262,8 +262,19 @@ if not raw_df.empty:
                 st.warning("未找到持仓数据。")
         else:
             st.info("请输入持仓代码。")
+
 else:
+    # 彻底空数据状态
     if last_error:
-        status_placeholder.error(f"❌ 初始化失败: {last_error}")
+        st.error(f"""
+        ❌ **数据获取失败 (网络问题)**
+        
+        **错误详情:** `{last_error}`
+        
+        **建议:**
+        1. 检查是否开启了 **VPN** (有时开启VPN会导致国内接口无法连接，有时关闭VPN会导致无法连接，请尝试切换)。
+        2. 如果你在公司内网，可能是防火墙限制。
+        3. 服务器正在自动重试中，请等待 10 秒后再次点击刷新按钮。
+        """)
     else:
-        status_placeholder.info("⏳ 服务器数据加载中，请稍后...")
+        status_placeholder.info("⏳ 服务器正在建立首次连接，请耐心等待 3-5 秒后手动刷新页面...")
