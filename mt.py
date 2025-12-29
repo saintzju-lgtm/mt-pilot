@@ -4,6 +4,7 @@ import akshare as ak
 import time
 import threading
 import ssl
+import random # 引入随机库，用于模拟人类操作
 from datetime import datetime, timedelta, timezone
 
 # --- 1. SSL 补丁 ---
@@ -16,7 +17,7 @@ else:
 
 # --- 2. 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v5.2：深度修复版",
+    page_title="游资捕手 v5.3：慢速稳定版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -56,34 +57,34 @@ class YangStrategy:
     @staticmethod
     def deep_scan_stock(symbol, current_price):
         """
-        深度体检：修复版
-        增加了重试机制和短暂延迟，解决 '获取失败' 问题
+        深度体检：大幅增加延迟，解决超时问题
         """
-        # 强制转换为字符串，Akshare有时候对数字敏感
         symbol_str = str(symbol)
         
-        # 最多重试 3 次
+        # 重试机制
         for attempt in range(3):
             try:
-                # 关键修复：每次请求前休息 0.3 秒，防止被服务器封IP
-                time.sleep(0.3)
+                # --- 核心修复：大幅增加间隔 ---
+                # 随机休眠 1.0 到 1.5 秒，模拟人类点击，防止被封 IP
+                sleep_time = random.uniform(1.0, 1.5)
+                time.sleep(sleep_time)
                 
-                # 拉取最近 40 天数据 (预留足够空间计算20日均线)
+                # 拉取历史数据
                 hist_df = ak.stock_zh_a_hist(symbol=symbol_str, period="daily", adjust="qfq")
                 
                 if hist_df.empty or len(hist_df) < 20:
-                    if attempt < 2: continue # 如果数据为空，重试
+                    if attempt < 2: continue 
                     return "⚪ 数据不足", "⚪ 数据不足"
                 
-                # 1. 均线趋势 (Trend)
+                # 1. 均线趋势
                 close_prices = hist_df['close']
                 ma5 = close_prices.rolling(5).mean().iloc[-1]
                 ma10 = close_prices.rolling(10).mean().iloc[-1]
                 ma20 = close_prices.rolling(20).mean().iloc[-1]
                 
                 trend_str = "⚪ 震荡/空头"
-                # 容错处理：只要 5>10 且 价格>5日线 就给优，稍微放宽标准
-                if ma5 > ma10 and current_price > ma5:
+                # 宽松判断：只要站上5日线且5>10即可
+                if current_price > ma5 and ma5 > ma10:
                     if ma10 > ma20:
                         trend_str = "📈 多头排列(优)"
                     else:
@@ -91,25 +92,22 @@ class YangStrategy:
                 elif current_price < ma5:
                     trend_str = "📉 破5日线(弱)"
                 
-                # 2. 位置风险 (Position)
+                # 2. 位置风险
                 lowest_20 = hist_df['low'].tail(20).min()
-                # 防止除以0错误
                 if lowest_20 == 0: lowest_20 = 0.01 
                 
                 position_ratio = current_price / lowest_20
                 
                 pos_str = "✅ 底部/腰部"
                 if position_ratio > 1.6:
-                    pos_str = "⚠️ 高位(慎)" # 20天涨幅过大
+                    pos_str = "⚠️ 高位(慎)" 
                 
-                # 成功获取，直接返回
                 return trend_str, pos_str
                 
             except Exception as e:
-                # 打印错误到后台方便调试（Streamlit不会显示print）
-                # print(f"Error fetching {symbol}: {e}")
+                # 失败后，休息更久再试
                 if attempt < 2:
-                    time.sleep(1) # 失败后多休息一会再试
+                    time.sleep(2.0 + attempt) 
                     continue
                 else:
                     return "⚪ 获取超时", "⚪ 获取超时"
@@ -123,11 +121,9 @@ class YangStrategy:
         df['Stop_Loss'] = df['Price'] * 0.97
         df['Target_Price'] = df['Price'] * 1.08
         
-        # --- 形态算法 ---
         def analyze_morphology(row):
             if row['Price'] == 0: return "数据缺失"
             
-            # 计算 VWAP (均价)
             avg_price = 0
             if row['Volume'] > 0:
                 avg_price = row['Amount'] / (row['Volume'] * 100)
@@ -137,7 +133,6 @@ class YangStrategy:
                 if row['Price'] > avg_price: vwap_status = "🌊水上"
                 else: vwap_status = "🏊水下"
 
-            # 计算上影线
             upper_shadow = 0
             if row['Price'] > 0:
                 upper_shadow = (row['High'] - row['Price']) / row['Price']
@@ -145,7 +140,6 @@ class YangStrategy:
             pre_close = row['Price'] / (1 + row['Change_Pct'] / 100)
             max_change_pct = (row['High'] - pre_close) / pre_close * 100 if pre_close > 0 else 0
 
-            # 判定
             if max_change_pct > 9.5 and row['Change_Pct'] < 9.0:
                 return f"💣 炸板 | {vwap_status}"
             
@@ -159,7 +153,6 @@ class YangStrategy:
 
         df['Morphology'] = df.apply(analyze_morphology, axis=1)
 
-        # --- 胜率评分 ---
         def calculate_win_score(row):
             score = 60
             if row['Turnover_Rate'] > 15: score += 15
@@ -254,8 +247,7 @@ class BackgroundEngine:
                 with self.lock:
                     self.error_count += 1
                     if self.error_count >= 3: self.last_error = f"Loop Crash: {str(e)}"
-            # 3分钟
-            time.sleep(180) 
+            time.sleep(180) # 3分钟
 
     def get_data(self):
         with self.lock:
@@ -268,7 +260,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- 5. UI 界面 ---
-st.title("🦅 游资捕手 v5.2：深度修复版")
+st.title("🦅 游资捕手 v5.3：慢速稳定版")
 
 with st.sidebar:
     st.header("⚙️ 1. 选股参数 (买)")
@@ -308,7 +300,7 @@ if not raw_df.empty:
     elif last_error:
         status_placeholder.warning(f"⚡ 网络波动 (使用缓存 {time_str})，系统正在后台重连...")
     else:
-        status_placeholder.success(f"✅ 系统正常运行 | 更新: {time_str} | 智能体检模块已加载")
+        status_placeholder.success(f"✅ 系统正常运行 | 更新: {time_str} | 深度扫描模块已优化")
 
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
@@ -325,17 +317,18 @@ if not raw_df.empty:
             progress_bar = st.progress(0)
             
             # --- 深度扫描循环 ---
+            target_count = len(display_result)
             for i, (index, row) in enumerate(display_result.iterrows()):
+                
                 # 只对光头强进行扫描
                 if "光头强" in row['Morphology']:
-                    # 调用修复后的 deep_scan_stock
                     t_str, p_str = YangStrategy.deep_scan_stock(row['Symbol'], row['Price'])
                 else:
                     t_str, p_str = "⚪ 非重点跳过", "⚪ 跳过"
                 
                 trends.append(t_str)
                 positions.append(p_str)
-                progress_bar.progress((i + 1) / len(display_result))
+                progress_bar.progress((i + 1) / target_count)
             
             display_result['Trend_Check'] = trends
             display_result['Pos_Check'] = positions
@@ -343,13 +336,21 @@ if not raw_df.empty:
             
             st.success("✅ 扫描完成。")
             
+            # --- 修复：重新加入操作说明文案 ---
+            st.info("""
+            📋 **杨永兴操盘铁律 (战术面板)：**
+            * **买入形态**：只看 [🚀 光头强] + [📈 多头排列] 的票。
+            * **卖出纪律**：[🎯 建议卖出] 为止盈位；[🛑 止损价] 跌破必跑。
+            * **均线说明**：若显示“获取超时”，请稍等片刻再次刷新，服务器正在排队请求。
+            """)
+            
             st.dataframe(
                 display_result[[
                     'Symbol', 'Name', 
                     'Win_Score', 
                     'Morphology',      
-                    'Trend_Check',     # 修复后的列
-                    'Pos_Check',       # 修复后的列
+                    'Trend_Check',    
+                    'Pos_Check',       
                     'Price', 'Change_Pct', 
                     'Buy_Price', 'Target_Price', 'Stop_Loss', 
                     'Turnover_Rate'
@@ -358,8 +359,8 @@ if not raw_df.empty:
                     "Symbol": "代码", "Name": "名称",
                     "Win_Score": st.column_config.ProgressColumn("🔥 胜率分", format="%d", min_value=0, max_value=100),
                     "Morphology": st.column_config.TextColumn("📊 分时/形态", width="medium"),
-                    "Trend_Check": st.column_config.TextColumn("📈 均线体检", help="只针对光头强"),
-                    "Pos_Check": st.column_config.TextColumn("⛰️ 位置风险", help="只针对光头强"),
+                    "Trend_Check": st.column_config.TextColumn("📈 均线体检", help="光头强标的深度检测"),
+                    "Pos_Check": st.column_config.TextColumn("⛰️ 位置风险", help="光头强标的深度检测"),
                     "Price": st.column_config.NumberColumn("现价", format="¥%.2f"),
                     "Change_Pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
                     "Buy_Price": st.column_config.NumberColumn("建议买入", format="¥%.2f"),
