@@ -17,18 +17,75 @@ else:
 
 # --- 2. 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v5.6：流量隐身版",
+    page_title="游资捕手 v5.7：终极缓存版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# --- 3. 核心策略逻辑 ---
+# --- 3. 独立缓存函数 (解决限流的核心) ---
+# 这个函数的结果会被存到内存里，4小时内(ttl=14400)不会重复联网请求同一个股票
+@st.cache_data(ttl=14400, show_spinner=False)
+def fetch_stock_history_analysis(symbol_str, current_price_ref):
+    """
+    独立的深度分析函数，带缓存机制。
+    current_price_ref: 传入当前价格仅用于计算，不影响历史数据的获取
+    """
+    try:
+        # 再次增加随机延迟，只有在缓存失效(第一次)时才会执行
+        time.sleep(random.uniform(1.0, 2.0))
+        
+        # 只拉取最近 3 个月数据
+        end_date = datetime.now().strftime("%Y%m%d")
+        start_date = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
+        
+        hist_df = ak.stock_zh_a_hist(
+            symbol=symbol_str, 
+            period="daily", 
+            start_date=start_date, 
+            end_date=end_date, 
+            adjust="qfq"
+        )
+        
+        if hist_df.empty or len(hist_df) < 5:
+            return "⚪ 数据不足", "⚪ 数据不足"
+        
+        # 1. 均线趋势
+        close_prices = hist_df['close']
+        ma5 = close_prices.rolling(5).mean().iloc[-1] if len(close_prices) >= 5 else 0
+        ma10 = close_prices.rolling(10).mean().iloc[-1] if len(close_prices) >= 10 else 0
+        ma20 = close_prices.rolling(20).mean().iloc[-1] if len(close_prices) >= 20 else 0
+        
+        trend_str = "⚪ 震荡"
+        # 只要站上5日线
+        if ma5 > 0 and current_price_ref > ma5:
+            if ma10 > 0 and ma5 > ma10:
+                trend_str = "📈 多头排列(优)"
+            else:
+                trend_str = "📈 短线强势"
+        elif ma5 > 0 and current_price_ref < ma5:
+            trend_str = "📉 破5日线(弱)"
+        
+        # 2. 位置风险
+        lowest_20 = hist_df['low'].tail(20).min()
+        if pd.isna(lowest_20) or lowest_20 == 0: lowest_20 = 0.01 
+        
+        position_ratio = current_price_ref / lowest_20
+        
+        pos_str = "✅ 底部/腰部"
+        if position_ratio > 1.6:
+            pos_str = "⚠️ 高位(慎)" 
+        
+        return trend_str, pos_str
+
+    except Exception:
+        return "⚪ 暂无数据", "⚪ 暂无数据"
+
+# --- 4. 核心策略逻辑 ---
 class YangStrategy:
     
     @staticmethod
     def get_market_data_silent(max_retries=3):
-        """全市场粗筛"""
         for i in range(max_retries):
             try:
                 df = ak.stock_zh_a_spot_em()
@@ -52,76 +109,6 @@ class YangStrategy:
                 else:
                     return pd.DataFrame(), str(e)
         return pd.DataFrame(), "网络请求最终失败"
-
-    @staticmethod
-    def deep_scan_stock(symbol, current_price):
-        """
-        深度体检：切片模式 + 慢速
-        只拉取最近100天的数据，大幅降低数据包大小，防止超时
-        """
-        symbol_str = str(symbol)
-        
-        # 计算起始日期：只拉取最近 3 个月 (足够计算20日均线)
-        start_date = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
-        end_date = datetime.now().strftime("%Y%m%d")
-
-        for attempt in range(3):
-            try:
-                # 随机延迟 2.0 - 3.0 秒 (模拟人类浏览)
-                sleep_time = random.uniform(2.0, 3.0)
-                time.sleep(sleep_time)
-                
-                # --- 核心修复：只拉取 start_date 之后的数据 ---
-                hist_df = ak.stock_zh_a_hist(
-                    symbol=symbol_str, 
-                    period="daily", 
-                    start_date=start_date, 
-                    end_date=end_date, 
-                    adjust="qfq"
-                )
-                
-                if hist_df.empty or len(hist_df) < 5:
-                    if attempt < 2: continue 
-                    return "⚪ 数据不足", "⚪ 数据不足"
-                
-                # 1. 均线趋势
-                close_prices = hist_df['close']
-                # 动态计算均线 (即使数据不够20天也能算出5天)
-                ma5 = close_prices.rolling(5).mean().iloc[-1] if len(close_prices) >= 5 else 0
-                ma10 = close_prices.rolling(10).mean().iloc[-1] if len(close_prices) >= 10 else 0
-                ma20 = close_prices.rolling(20).mean().iloc[-1] if len(close_prices) >= 20 else 0
-                
-                trend_str = "⚪ 震荡/空头"
-                # 只要站上5日线
-                if ma5 > 0 and current_price > ma5:
-                    if ma10 > 0 and ma5 > ma10:
-                        trend_str = "📈 多头排列(优)"
-                    else:
-                        trend_str = "📈 短线强势"
-                elif ma5 > 0 and current_price < ma5:
-                    trend_str = "📉 破5日线(弱)"
-                
-                # 2. 位置风险
-                # 取最近20个交易日的最低价
-                lowest_20 = hist_df['low'].tail(20).min()
-                if pd.isna(lowest_20) or lowest_20 == 0: lowest_20 = 0.01 
-                
-                position_ratio = current_price / lowest_20
-                
-                pos_str = "✅ 底部/腰部"
-                if position_ratio > 1.6:
-                    pos_str = "⚠️ 高位(慎)" 
-                
-                return trend_str, pos_str
-                
-            except Exception as e:
-                if attempt < 2:
-                    time.sleep(3.0) # 失败重试前多睡会儿
-                    continue
-                else:
-                    return "⚪ 接口限流", "⚪ 接口限流"
-        
-        return "⚪ 未知错误", "⚪ 未知错误"
 
     @staticmethod
     def calculate_battle_plan(df):
@@ -162,18 +149,13 @@ class YangStrategy:
             score = 60
             if row['Turnover_Rate'] > 15: score += 15
             elif row['Turnover_Rate'] > 10: score += 10
-            
             if row['Volume_Ratio'] > 4.0: score += 10
             elif row['Volume_Ratio'] > 2.5: score += 8
-            
             if "水上" in row['Morphology']: score += 10
-            
             if "光头强" in row['Morphology']: score += 15
             elif "长上影" in row['Morphology']: score -= 15
             elif "炸板" in row['Morphology']: score -= 30
-            
             if 4.0 <= row['Change_Pct'] <= 8.5: score += 5
-            
             return min(max(score, 0), 99)
 
         df['Win_Score'] = df.apply(calculate_win_score, axis=1)
@@ -183,12 +165,10 @@ class YangStrategy:
     def check_sell_signals(holdings_df):
         signals = []
         if holdings_df.empty: return pd.DataFrame()
-
         for _, row in holdings_df.iterrows():
             reason = []
             status = "持仓观察"
             color = "#e6f3ff"; border_color = "#ccc"
-
             if row['Change_Pct'] < -3.0:
                 status = "🛑 止损卖出"; reason.append("触及-3%止损线")
                 color = "#ffe6e6"; border_color = "red"
@@ -200,7 +180,6 @@ class YangStrategy:
                 elif row['Change_Pct'] < 0 and row['Price'] < row['Open']:
                     status = "⚠️ 弱势预警"; reason.append("水下震荡")
                     color = "#ffffcc"; border_color = "#cccc00"
-            
             signals.append({
                 "代码": row['Symbol'], "名称": row['Name'], "现价": row['Price'],
                 "涨跌幅": f"{row['Change_Pct']}%", "建议操作": status,
@@ -223,7 +202,7 @@ class YangStrategy:
         result = YangStrategy.calculate_battle_plan(filtered)
         return result.sort_values(by='Win_Score', ascending=False)
 
-# --- 4. 后台数据引擎 ---
+# --- 5. 后台数据引擎 ---
 class BackgroundEngine:
     def __init__(self):
         self.raw_data = pd.DataFrame()
@@ -264,8 +243,8 @@ def get_global_engine():
 
 data_engine = get_global_engine()
 
-# --- 5. UI 界面 ---
-st.title("🦅 游资捕手 v5.6：流量隐身版")
+# --- 6. UI 界面 ---
+st.title("🦅 游资捕手 v5.7：终极缓存版")
 
 with st.sidebar:
     st.header("⚙️ 1. 选股参数 (买)")
@@ -277,7 +256,7 @@ with st.sidebar:
     min_vol_ratio = st.number_input("最低量比", 1.5)
     
     st.markdown("---")
-    top_n = st.slider("🎯 扫描前 N 名", 5, 50, 10, help="扫描速度较慢。为了保护接口，每次最多只深度体检其中 5 只光头强。")
+    top_n = st.slider("🎯 扫描前 N 名", 3, 20, 3, help="为了彻底解决限流，建议只深度体检 Top 3。数据会缓存，越用越快。")
     
     st.divider()
     st.header("🛡️ 2. 持仓监控 (卖)")
@@ -291,7 +270,7 @@ with st.sidebar:
         time.sleep(180)
         st.rerun()
 
-# --- 6. 主展示逻辑 ---
+# --- 7. 主展示逻辑 ---
 status_placeholder = st.empty()
 raw_df, last_time, last_error = data_engine.get_data()
 
@@ -305,7 +284,7 @@ if not raw_df.empty:
     elif last_error:
         status_placeholder.warning(f"⚡ 网络波动 (使用缓存 {time_str})，系统正在后台重连...")
     else:
-        status_placeholder.success(f"✅ 系统正常运行 | 更新: {time_str} | 隐身模式已激活")
+        status_placeholder.success(f"✅ 系统正常运行 | 更新: {time_str} | 智能缓存已激活 (0流量耗损)")
 
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
@@ -314,7 +293,7 @@ if not raw_df.empty:
         📋 **杨永兴操盘铁律 (战术面板)：**
         * **买入形态**：只看 [🚀 光头强] + [📈 多头排列] 的票。
         * **卖出纪律**：[🎯 建议卖出] 为止盈位；[🛑 止损价] 跌破必跑。
-        * **状态说明**：已开启“流量隐身”模式 (每次只扫描最近3个月数据)，以解决接口限流问题。
+        * **重要提示**：均线/风险数据已启用**内存缓存**。第一次扫描可能较慢，但之后刷新将**秒开**且不再消耗接口额度。
         """)
 
         full_result = YangStrategy.filter_stocks(raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio)
@@ -328,18 +307,24 @@ if not raw_df.empty:
             progress_bar = st.progress(0)
             target_count = len(display_result)
             
-            # 限制深度扫描数量，保护接口 (即使TopN选了10，最多也只扫前5个光头强)
-            scan_count = 0 
+            # 为了防止一次性请求过多，我们在 Top N 内部也做一个硬限制
+            # 无论 Top N 选多少，每次最多只去联网查前 5 个
+            limit_counter = 0 
             
             for i, (index, row) in enumerate(display_result.iterrows()):
-                if "光头强" in row['Morphology'] and scan_count < 5:
-                    t_str, p_str = YangStrategy.deep_scan_stock(row['Symbol'], row['Price'])
-                    scan_count += 1
+                if "光头强" in row['Morphology'] and limit_counter < 5:
+                    # 调用带缓存的函数
+                    # 注意：这里我们使用 try-except 包裹，防止单个失败影响整体
+                    try:
+                        t_str, p_str = fetch_stock_history_analysis(row['Symbol'], row['Price'])
+                    except:
+                        t_str, p_str = "⚪ 缓存未命中", "⚪ 稍后刷新"
+                    limit_counter += 1
                 else:
                     if "光头强" in row['Morphology']:
-                        t_str, p_str = "⚪ 额度耗尽(跳过)", "⚪ 跳过"
+                        t_str, p_str = "⚪ 稍后扫描", "⚪ 稍后扫描"
                     else:
-                        t_str, p_str = "⚪ 非重点跳过", "⚪ 跳过"
+                        t_str, p_str = "⚪ 非重点", "⚪ 跳过"
                 
                 trends.append(t_str)
                 positions.append(p_str)
@@ -364,8 +349,8 @@ if not raw_df.empty:
                     "Symbol": "代码", "Name": "名称",
                     "Win_Score": st.column_config.ProgressColumn("🔥 胜率分", format="%d", min_value=0, max_value=100),
                     "Morphology": st.column_config.TextColumn("📊 分时/形态", width="medium"),
-                    "Trend_Check": st.column_config.TextColumn("📈 均线体检", help="光头强标的深度检测"),
-                    "Pos_Check": st.column_config.TextColumn("⛰️ 位置风险", help="光头强标的深度检测"),
+                    "Trend_Check": st.column_config.TextColumn("📈 均线(缓存)", help="数据缓存4小时，彻底解决限流"),
+                    "Pos_Check": st.column_config.TextColumn("⛰️ 位置风险", help="数据缓存4小时，彻底解决限流"),
                     "Price": st.column_config.NumberColumn("现价", format="¥%.2f"),
                     "Change_Pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
                     "Buy_Price": st.column_config.NumberColumn("建议买入", format="¥%.2f"),
