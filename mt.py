@@ -17,7 +17,7 @@ else:
 
 # --- 2. 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v5.9：全力进攻版",
+    page_title="Speculative Capital Catcher v5.9",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
