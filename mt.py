@@ -16,7 +16,7 @@ else:
 
 # --- 2. 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v4.1：形态雷达版",
+    page_title="游资捕手 v4.2：完整形态版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -52,45 +52,33 @@ class YangStrategy:
     @staticmethod
     def calculate_battle_plan(df):
         if df.empty: return df
+        # 计算作战价格
         df['Buy_Price'] = df['Price']
         df['Stop_Loss'] = df['Price'] * 0.97
         df['Target_Price'] = df['Price'] * 1.08
         
-        # --- 核心升级：形态算法 (Morphology) ---
+        # 形态算法
         def analyze_morphology(row):
-            # 1. 计算昨收盘 (反推)
             if row['Price'] == 0: return "数据缺失"
             pre_close = row['Price'] / (1 + row['Change_Pct'] / 100)
             
-            # 2. 计算最高涨幅 (判断是否摸过涨停)
             max_change_pct = 0
             if pre_close > 0:
                 max_change_pct = (row['High'] - pre_close) / pre_close * 100
             
-            # 3. 计算上影线长度 (回撤幅度)
-            # (最高 - 现价) / 现价
             upper_shadow = 0
             if row['Price'] > 0:
                 upper_shadow = (row['High'] - row['Price']) / row['Price']
             
-            # --- 判定逻辑 ---
-            
-            # A. 炸板：摸过涨停(>9.5%)，但现在没封住(<9.5%)
-            # 这种票套牢盘极重，绝对要避开
             if max_change_pct > 9.5 and row['Change_Pct'] < 9.0:
                 return "💣 炸板(大忌)"
             
-            # B. 光头强：收盘价极度接近最高价 (回撤 < 0.5%)
-            # 说明多头一直买到收盘，明天高开概率大
             if upper_shadow < 0.005 and row['Change_Pct'] > 3.0:
                 return "🚀 光头强(极品)"
             
-            # C. 长上影：冲高回落 (>2%)
-            # 说明上方抛压大，形态难看
             if upper_shadow > 0.02:
                 return "⚡ 长上影(抛压)"
             
-            # D. 假阴线：虽然涨了，但比开盘价低
             if row['Price'] < row['Open']:
                 return "📉 假阴线(弱)"
                 
@@ -98,36 +86,31 @@ class YangStrategy:
 
         df['Morphology'] = df.apply(analyze_morphology, axis=1)
 
-        # --- 胜率评分 (Yang Score) 升级 ---
+        # 胜率评分
         def calculate_win_score(row):
             score = 60
             
-            # 1. 换手率 (40分)
             if row['Turnover_Rate'] > 15: score += 15
             elif row['Turnover_Rate'] > 10: score += 10
             elif row['Turnover_Rate'] > 7: score += 5
             
-            # 2. 量比 (30分)
             if row['Volume_Ratio'] > 4.0: score += 10
             elif row['Volume_Ratio'] > 2.5: score += 8
             elif row['Volume_Ratio'] > 1.8: score += 5
             
-            # 3. 形态加权 (20分) - 联动上面的算法
             morph = row['Morphology']
-            if "光头强" in morph: score += 15     # 极品形态加分
+            if "光头强" in morph: score += 15     
             elif "正常" in morph: score += 5
-            elif "长上影" in morph: score -= 15   # 难看形态重罚
-            elif "炸板" in morph: score -= 30     # 炸板直接废掉
+            elif "长上影" in morph: score -= 15   
+            elif "炸板" in morph: score -= 30     
             elif "假阴线" in morph: score -= 10
             
-            # 4. 黄金区间
             if 4.0 <= row['Change_Pct'] <= 8.5: score += 5
             
-            return min(max(score, 0), 99) # 0-99分
+            return min(max(score, 0), 99)
 
         df['Win_Score'] = df.apply(calculate_win_score, axis=1)
         
-        # 优化风控建议文案，避免重复
         def final_advice(row):
             if "炸板" in row['Morphology']: return "❌ 严禁买入"
             if "长上影" in row['Morphology']: return "⚠️ 观望为主"
@@ -135,7 +118,6 @@ class YangStrategy:
             return "⚪ 酌情参与"
             
         df['Advice_Summary'] = df.apply(final_advice, axis=1)
-        
         return df
 
     @staticmethod
@@ -220,8 +202,7 @@ class BackgroundEngine:
                     if self.error_count >= 3:
                         self.last_error = f"Loop Crash: {str(e)}"
             
-            # 3分钟刷新一次
-            time.sleep(180)
+            time.sleep(180) # 3分钟
 
     def get_data(self):
         with self.lock:
@@ -234,7 +215,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- 5. UI 界面 ---
-st.title("🦅 游资捕手 v4.1：形态雷达版")
+st.title("🦅 游资捕手 v4.2：完整形态版")
 
 with st.sidebar:
     st.header("⚙️ 1. 选股参数 (买)")
@@ -274,7 +255,7 @@ if not raw_df.empty:
     elif last_error:
         status_placeholder.warning(f"⚡ 网络波动 (使用缓存 {time_str})，系统正在后台重连...")
     else:
-        status_placeholder.success(f"✅ 系统正常运行 | 更新: {time_str} | 已启用“形态算法”识别主力意图")
+        status_placeholder.success(f"✅ 系统正常运行 | 更新: {time_str} | 智能因子已激活")
 
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
@@ -285,37 +266,38 @@ if not raw_df.empty:
         if len(display_result) > 0:
             st.markdown(f"### 🏆 综合评分 Top {len(display_result)}")
             
-            # 操盘说明
             st.info("""
-            📋 **形态选股口诀 (Morphology Guide)：**
-            1. **首选 [🚀 光头强]**：尾盘抢筹，没有上影线，明日溢价最高。
-            2. **避开 [⚡ 长上影]**：冲高回落，套牢盘重，容易低开。
-            3. **严禁 [💣 炸板]**：涨停被砸，主力出逃，接飞刀必死。
+            📋 **形态选股口诀：** 首选 [🚀 光头强]；避开 [⚡ 长上影]；严禁 [💣 炸板]。
             """)
             
+            # --- 恢复完整的列展示 ---
             st.dataframe(
                 display_result[[
                     'Symbol', 'Name', 
                     'Win_Score', 
-                    'Morphology',      # <--- 核心新列：K线形态
-                    'Advice_Summary',  # <--- 核心新列：直接建议
+                    'Morphology',      # K线形态
+                    'Advice_Summary',  # 判官建议
                     'Price', 'Change_Pct', 
+                    'Buy_Price',       # 建议买入 (已恢复)
+                    'Target_Price',    # 建议卖出 (已恢复)
+                    'Stop_Loss',       # 止损价 (已恢复)
                     'Turnover_Rate', 'Volume_Ratio'
                 ]],
                 column_config={
                     "Symbol": "代码", "Name": "名称",
                     "Win_Score": st.column_config.ProgressColumn("🔥 胜率分", format="%d", min_value=0, max_value=100),
                     
-                    # --- 形态可视化 ---
-                    "Morphology": st.column_config.TextColumn(
-                        "📊 K线形态", 
-                        help="通过最高价与收盘价计算。光头强=最强；长上影=有抛压。",
-                        width="medium"
-                    ),
+                    "Morphology": st.column_config.TextColumn("📊 K线形态", width="medium"),
                     "Advice_Summary": st.column_config.TextColumn("🤖 判官建议", width="small"),
                     
                     "Price": st.column_config.NumberColumn("现价", format="¥%.2f"),
                     "Change_Pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
+                    
+                    # --- 核心交易价格 ---
+                    "Buy_Price": st.column_config.NumberColumn("建议买入", format="¥%.2f"),
+                    "Target_Price": st.column_config.NumberColumn("🎯 建议卖出", format="¥%.2f", help="短线止盈目标"),
+                    "Stop_Loss": st.column_config.NumberColumn("🛑 止损价", format="¥%.2f", help="铁律：跌破必走"),
+                    
                     "Turnover_Rate": st.column_config.ProgressColumn("换手", format="%.1f%%", min_value=0, max_value=20),
                     "Volume_Ratio": st.column_config.NumberColumn("量比", format="%.1f")
                 },
