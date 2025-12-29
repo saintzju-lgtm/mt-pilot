@@ -241,7 +241,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- 6. UI 界面 ---
-st.title("🦅 游资捕手 v5.9：全力进攻版")
+st.title("🦅 Speculative Capital Catcher v5.9")
 
 with st.sidebar:
     st.header("⚙️ 1. 选股参数 (买)")
