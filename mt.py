@@ -3,10 +3,10 @@ import pandas as pd
 import akshare as ak
 import time
 import threading
-import ssl # 引入 SSL 模块
+import ssl
 from datetime import datetime, timedelta, timezone
 
-# --- 核心修复：绕过 SSL 验证 (解决部分网络 ReadTimeout 问题) ---
+# --- SSL 修复 ---
 try:
     _create_unverified_https_context = ssl._create_unverified_context
 except AttributeError:
@@ -16,7 +16,7 @@ else:
 
 # --- 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v3.7：网络增强版",
+    page_title="游资捕手 v3.8：胜率精选版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -27,13 +27,9 @@ class YangStrategy:
     
     @staticmethod
     def get_market_data_silent(max_retries=3):
-        """绝对静默版数据获取 - 增强网络稳定性"""
         for i in range(max_retries):
             try:
-                # 获取数据
                 df = ak.stock_zh_a_spot_em()
-                
-                # 数据清洗
                 df = df.rename(columns={
                     '代码': 'Symbol', '名称': 'Name', '最新价': 'Price',
                     '涨跌幅': 'Change_Pct', '换手率': 'Turnover_Rate',
@@ -45,7 +41,6 @@ class YangStrategy:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                 return df, None
             except Exception as e:
-                # 遇到错误，休息时间随重试次数增加 (3s, 6s, 9s)
                 sleep_time = (i + 1) * 3
                 if i < max_retries - 1:
                     time.sleep(sleep_time)
@@ -61,22 +56,52 @@ class YangStrategy:
         df['Stop_Loss'] = df['Price'] * 0.97
         df['Target_Price'] = df['Price'] * 1.08
         
-        # 风控雷达逻辑
+        # 1. 风控建议
         def assess_risk_for_buyers(row):
             drawdown = 0
             if row['High'] > 0:
                 drawdown = (row['High'] - row['Price']) / row['High'] * 100
             
-            if row['Change_Pct'] > 9.0:
-                return "🔥 强势封板"
-            elif drawdown > 4.0:
-                return "⚠️ 冲高回落(慎追)"
-            elif row['Price'] < row['Open']:
-                return "⚠️ 假阴线(需观察)"
-            else:
-                return "🟢 趋势向上(可击)"
-
+            if row['Change_Pct'] > 9.5: return "🔥 强势封板"
+            elif drawdown > 4.0: return "⚠️ 冲高回落(慎追)"
+            elif row['Price'] < row['Open']: return "⚠️ 假阴线(需观察)"
+            else: return "🟢 趋势向上(可击)"
+            
         df['Risk_Advice'] = df.apply(assess_risk_for_buyers, axis=1)
+
+        # 2. 核心算法：杨氏胜率评分 (Yang Score)
+        # 这是一个基于“因子完美度”的打分系统，满分 100
+        def calculate_win_score(row):
+            score = 60 # 基础及格分
+            
+            # A. 换手率 (权重最高)：越高越好，说明资金在接力
+            if row['Turnover_Rate'] > 15: score += 15
+            elif row['Turnover_Rate'] > 10: score += 10
+            elif row['Turnover_Rate'] > 7: score += 5
+            
+            # B. 量比 (爆发力)：越大越好
+            if row['Volume_Ratio'] > 4.0: score += 10
+            elif row['Volume_Ratio'] > 2.5: score += 8
+            elif row['Volume_Ratio'] > 1.8: score += 5
+            
+            # C. 黄金区间 (涨幅)：杨永兴最喜欢 4%-8% 之间的票，刚启动且没涨停
+            if 4.0 <= row['Change_Pct'] <= 8.0: score += 10
+            elif 2.0 <= row['Change_Pct'] < 4.0: score += 5
+            
+            # D. 市值偏好：小盘股加分
+            mkt_cap_b = row['Market_Cap'] / 100000000
+            if mkt_cap_b < 100: score += 5
+            
+            # E. 扣分项：回撤过大 (钓鱼线)
+            drawdown = 0
+            if row['High'] > 0:
+                drawdown = (row['High'] - row['Price']) / row['High'] * 100
+            if drawdown > 3.0: score -= 15 # 形态坏了，大幅扣分
+            
+            return min(score, 99) # 封顶99
+
+        df['Win_Score'] = df.apply(calculate_win_score, axis=1)
+        
         return df
 
     @staticmethod
@@ -124,7 +149,9 @@ class YangStrategy:
             (df['Change_Pct'] <= max_change) &
             (df['Volume_Ratio'] >= min_vol_ratio)
         ]
-        return YangStrategy.calculate_battle_plan(filtered).sort_values(by='Turnover_Rate', ascending=False)
+        # 计算完所有数据后，按照分数降序排列
+        result = YangStrategy.calculate_battle_plan(filtered)
+        return result.sort_values(by='Win_Score', ascending=False)
 
 # --- 后台数据引擎 ---
 class BackgroundEngine:
@@ -152,8 +179,6 @@ class BackgroundEngine:
             except Exception as e:
                 with self.lock:
                     self.last_error = f"Loop Crash: {str(e)}"
-            
-            # 服务器端刷新频率：60秒
             time.sleep(60)
 
     def get_data(self):
@@ -167,7 +192,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- UI 界面 ---
-st.title("🦅 游资捕手 v3.7：网络增强版")
+st.title("🦅 游资捕手 v3.8：胜率精选版")
 
 with st.sidebar:
     st.header("⚙️ 1. 选股参数 (买)")
@@ -177,6 +202,10 @@ with st.sidebar:
     min_change = col1.number_input("涨幅下限", 2.0)
     max_change = col2.number_input("涨幅上限", 8.5)
     min_vol_ratio = st.number_input("最低量比", 1.5)
+    
+    st.markdown("---")
+    # --- 新增功能：Top N 控制 ---
+    top_n = st.slider("🎯 只展示分数前 N 名", 5, 50, 10, help="为了避免眼花缭乱，建议只看前10名分数最高的。")
     
     st.divider()
     st.header("🛡️ 2. 持仓监控 (卖)")
@@ -193,42 +222,56 @@ with st.sidebar:
 status_placeholder = st.empty()
 raw_df, last_time, last_error = data_engine.get_data()
 
-# 判断逻辑：如果数据为空，说明正在冷启动或完全挂了
 if not raw_df.empty:
     time_str = last_time.strftime('%H:%M:%S')
     if last_error:
-        status_placeholder.warning(f"⚠️ 数据展示中 (缓存 {time_str}) | 后台最新尝试失败: {last_error}")
+        status_placeholder.warning(f"⚠️ 数据展示中 (缓存 {time_str}) | 后台异常: {last_error}")
     else:
-        status_placeholder.success(f"✅ 数据状态健康 | 更新时间: {time_str} (北京时间)")
+        status_placeholder.success(f"✅ 数据健康 | 更新: {time_str} | 已按“胜率评分”智能排序")
 
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
-    # --- TAB 1: 狙击买入 ---
+    # --- TAB 1: 狙击买入 (评分精选) ---
     with tab1:
-        result_df = YangStrategy.filter_stocks(raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio)
+        # 获取全部符合条件的
+        full_result = YangStrategy.filter_stocks(raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio)
         
-        if len(result_df) > 0:
-            st.markdown(f"### 🎯 发现 {len(result_df)} 个标的")
-            st.info("""
-            📋 **杨永兴操盘铁律 (通用剧本)：**
-            1. **买入后**：若当日封死涨停，则持有；若炸板，立即走人。
-            2. **隔日卖出**：明日集合竞价若**不红盘高开**，开盘直接清仓；若高开，则持股待涨至目标价。
-            """)
+        # 截取前 Top N
+        display_result = full_result.head(top_n)
+        
+        if len(display_result) > 0:
+            st.markdown(f"### 🏆 综合评分 Top {len(display_result)} (共发现 {len(full_result)} 只)")
+            st.caption("注：**“胜率分”** 基于换手率、量比、形态完美度计算。分数越高，符合“杨永兴爆发模型”的概率越大。")
+            
+            # 通用剧本说明
+            st.info("📋 **操盘纪律：** 现价买入 -> 封板持有/炸板走 -> 明日竞价不红盘直接走。")
             
             st.dataframe(
-                result_df[[
-                    'Symbol', 'Name', 'Price', 'Change_Pct', 
-                    'Risk_Advice', 'Buy_Price', 
-                    'Target_Price', 'Stop_Loss', 
+                display_result[[
+                    'Symbol', 'Name', 
+                    'Win_Score',       # <--- 核心新列：胜率评分
+                    'Price', 'Change_Pct', 
+                    'Risk_Advice', 
+                    'Buy_Price', 'Target_Price', 'Stop_Loss', 
                     'Turnover_Rate', 'Volume_Ratio'
                 ]],
                 column_config={
                     "Symbol": "代码", "Name": "名称",
+                    
+                    # --- 胜率评分可视化 ---
+                    "Win_Score": st.column_config.ProgressColumn(
+                        "🔥 胜率分",
+                        help="根据杨永兴因子计算的形态评分 (0-100)",
+                        format="%d",
+                        min_value=0,
+                        max_value=100,
+                    ),
+                    
                     "Price": st.column_config.NumberColumn("现价", format="¥%.2f"),
                     "Change_Pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
                     "Risk_Advice": st.column_config.TextColumn("⚡ 实时风控", width="medium"),
                     "Buy_Price": st.column_config.NumberColumn("建议买入", format="¥%.2f"),
-                    "Target_Price": st.column_config.NumberColumn("🎯 建议卖出", format="¥%.2f", help="短线第一止盈目标位 (+8%)"),
+                    "Target_Price": st.column_config.NumberColumn("🎯 建议卖出", format="¥%.2f"),
                     "Stop_Loss": st.column_config.NumberColumn("🛑 止损价", format="¥%.2f"),
                     "Turnover_Rate": st.column_config.ProgressColumn("换手", format="%.1f%%", min_value=0, max_value=20),
                     "Volume_Ratio": st.column_config.NumberColumn("量比", format="%.1f")
@@ -262,19 +305,8 @@ if not raw_df.empty:
                 st.warning("未找到持仓数据。")
         else:
             st.info("请输入持仓代码。")
-
 else:
-    # 彻底空数据状态
     if last_error:
-        st.error(f"""
-        ❌ **数据获取失败 (网络问题)**
-        
-        **错误详情:** `{last_error}`
-        
-        **建议:**
-        1. 检查是否开启了 **VPN** (有时开启VPN会导致国内接口无法连接，有时关闭VPN会导致无法连接，请尝试切换)。
-        2. 如果你在公司内网，可能是防火墙限制。
-        3. 服务器正在自动重试中，请等待 10 秒后再次点击刷新按钮。
-        """)
+        st.error(f"❌ 数据获取失败: {last_error}。正在自动重试...")
     else:
-        status_placeholder.info("⏳ 服务器正在建立首次连接，请耐心等待 3-5 秒后手动刷新页面...")
+        status_placeholder.info("⏳ 服务器正在建立连接 (3-5秒)...")
