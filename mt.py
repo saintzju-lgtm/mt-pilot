@@ -17,7 +17,7 @@ else:
 
 # --- 2. 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v5.4：极速聚焦版",
+    page_title="游资捕手 v5.5：慢速稳健版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -42,7 +42,6 @@ class YangStrategy:
                 cols = ['Price', 'Change_Pct', 'Turnover_Rate', 'Volume_Ratio', 'Market_Cap', 'High', 'Low', 'Open', 'Volume', 'Amount']
                 for col in cols:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
-                # 确保代码列是字符串
                 df['Symbol'] = df['Symbol'].astype(str)
                 return df, None
             except Exception as e:
@@ -57,15 +56,15 @@ class YangStrategy:
     @staticmethod
     def deep_scan_stock(symbol, current_price):
         """
-        深度体检：保留了随机延迟，防止封IP
+        深度体检：极慢速模式，防止 Timeout
         """
         symbol_str = str(symbol)
         
-        # 重试机制
         for attempt in range(3):
             try:
-                # 随机休眠 1.0 到 1.5 秒
-                sleep_time = random.uniform(1.0, 1.5)
+                # --- 核心修复：更长的随机延迟 ---
+                # 牺牲速度换取稳定性。平均间隔 2 秒。
+                sleep_time = random.uniform(1.5, 2.5)
                 time.sleep(sleep_time)
                 
                 # 拉取历史数据
@@ -104,10 +103,11 @@ class YangStrategy:
                 
             except Exception as e:
                 if attempt < 2:
-                    time.sleep(2.0 + attempt) 
+                    # 失败后休息更久 (3秒起步)
+                    time.sleep(3.0 + attempt) 
                     continue
                 else:
-                    return "⚪ 获取超时", "⚪ 获取超时"
+                    return "⚪ 接口限流", "⚪ 接口限流"
         
         return "⚪ 未知错误", "⚪ 未知错误"
 
@@ -120,7 +120,6 @@ class YangStrategy:
         
         def analyze_morphology(row):
             if row['Price'] == 0: return "数据缺失"
-            
             avg_price = 0
             if row['Volume'] > 0:
                 avg_price = row['Amount'] / (row['Volume'] * 100)
@@ -139,13 +138,10 @@ class YangStrategy:
 
             if max_change_pct > 9.5 and row['Change_Pct'] < 9.0:
                 return f"💣 炸板 | {vwap_status}"
-            
             if upper_shadow < 0.005 and row['Change_Pct'] > 3.0:
                 return f"🚀 光头强 | {vwap_status}"
-            
             if upper_shadow > 0.02:
                 return f"⚡ 长上影 | {vwap_status}"
-            
             return f"✅ 均势 | {vwap_status}"
 
         df['Morphology'] = df.apply(analyze_morphology, axis=1)
@@ -244,7 +240,7 @@ class BackgroundEngine:
                 with self.lock:
                     self.error_count += 1
                     if self.error_count >= 3: self.last_error = f"Loop Crash: {str(e)}"
-            time.sleep(180) # 3分钟
+            time.sleep(180) 
 
     def get_data(self):
         with self.lock:
@@ -257,7 +253,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- 5. UI 界面 ---
-st.title("🦅 游资捕手 v5.4：极速聚焦版")
+st.title("🦅 游资捕手 v5.5：慢速稳健版")
 
 with st.sidebar:
     st.header("⚙️ 1. 选股参数 (买)")
@@ -269,8 +265,7 @@ with st.sidebar:
     min_vol_ratio = st.number_input("最低量比", 1.5)
     
     st.markdown("---")
-    # --- 核心改动：默认 Top 10 ---
-    top_n = st.slider("🎯 扫描前 N 名", 5, 50, 10, help="只对分数最高的前N名进行深度体检。默认10，速度最快。")
+    top_n = st.slider("🎯 扫描前 N 名", 5, 50, 10, help="默认10。扫描速度会比较慢(为了防封IP)，请耐心等待。")
     
     st.divider()
     st.header("🛡️ 2. 持仓监控 (卖)")
@@ -307,18 +302,23 @@ if not raw_df.empty:
         display_result = full_result.head(top_n).copy()
         
         if len(display_result) > 0:
-            st.markdown(f"### 🧬 正在对 Top {len(display_result)} 中的【🚀 光头强】进行深度体检...")
+            # --- 修复：将文字提示提到最前面，防止被覆盖 ---
+            st.info("""
+            📋 **杨永兴操盘铁律 (战术面板)：**
+            * **买入形态**：只看 [🚀 光头强] + [📈 多头排列] 的票。
+            * **卖出纪律**：[🎯 建议卖出] 为止盈位；[🛑 止损价] 跌破必跑。
+            * **状态说明**：深度体检较慢 (约20秒)，若显示“接口限流”，请等待下一次自动刷新。
+            """)
+            
+            st.markdown(f"### 🧬 正在对 Top {len(display_result)} 中的【🚀 光头强】进行深度体检 (请耐心等待)...")
             
             trends = []
             positions = []
             
             progress_bar = st.progress(0)
-            
-            # --- 深度扫描循环 ---
             target_count = len(display_result)
+            
             for i, (index, row) in enumerate(display_result.iterrows()):
-                
-                # 只对光头强进行扫描
                 if "光头强" in row['Morphology']:
                     t_str, p_str = YangStrategy.deep_scan_stock(row['Symbol'], row['Price'])
                 else:
@@ -331,15 +331,6 @@ if not raw_df.empty:
             display_result['Trend_Check'] = trends
             display_result['Pos_Check'] = positions
             progress_bar.empty()
-            
-            st.success(f"✅ 扫描完成 (Top {top_n})。")
-            
-            st.info("""
-            📋 **杨永兴操盘铁律 (战术面板)：**
-            * **买入形态**：只看 [🚀 光头强] + [📈 多头排列] 的票。
-            * **卖出纪律**：[🎯 建议卖出] 为止盈位；[🛑 止损价] 跌破必跑。
-            * **均线说明**：若显示“获取超时”，请稍等片刻再次刷新。
-            """)
             
             st.dataframe(
                 display_result[[
