@@ -4,7 +4,7 @@ import akshare as ak
 import time
 import threading
 import ssl
-import random # 引入随机库，用于模拟人类操作
+import random
 from datetime import datetime, timedelta, timezone
 
 # --- 1. SSL 补丁 ---
@@ -17,7 +17,7 @@ else:
 
 # --- 2. 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v5.3：慢速稳定版",
+    page_title="游资捕手 v5.4：极速聚焦版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -57,15 +57,14 @@ class YangStrategy:
     @staticmethod
     def deep_scan_stock(symbol, current_price):
         """
-        深度体检：大幅增加延迟，解决超时问题
+        深度体检：保留了随机延迟，防止封IP
         """
         symbol_str = str(symbol)
         
         # 重试机制
         for attempt in range(3):
             try:
-                # --- 核心修复：大幅增加间隔 ---
-                # 随机休眠 1.0 到 1.5 秒，模拟人类点击，防止被封 IP
+                # 随机休眠 1.0 到 1.5 秒
                 sleep_time = random.uniform(1.0, 1.5)
                 time.sleep(sleep_time)
                 
@@ -83,7 +82,6 @@ class YangStrategy:
                 ma20 = close_prices.rolling(20).mean().iloc[-1]
                 
                 trend_str = "⚪ 震荡/空头"
-                # 宽松判断：只要站上5日线且5>10即可
                 if current_price > ma5 and ma5 > ma10:
                     if ma10 > ma20:
                         trend_str = "📈 多头排列(优)"
@@ -105,7 +103,6 @@ class YangStrategy:
                 return trend_str, pos_str
                 
             except Exception as e:
-                # 失败后，休息更久再试
                 if attempt < 2:
                     time.sleep(2.0 + attempt) 
                     continue
@@ -260,7 +257,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- 5. UI 界面 ---
-st.title("🦅 游资捕手 v5.3：慢速稳定版")
+st.title("🦅 游资捕手 v5.4：极速聚焦版")
 
 with st.sidebar:
     st.header("⚙️ 1. 选股参数 (买)")
@@ -272,7 +269,8 @@ with st.sidebar:
     min_vol_ratio = st.number_input("最低量比", 1.5)
     
     st.markdown("---")
-    top_n = st.slider("🎯 扫描前 N 名", 5, 50, 15)
+    # --- 核心改动：默认 Top 10 ---
+    top_n = st.slider("🎯 扫描前 N 名", 5, 50, 10, help="只对分数最高的前N名进行深度体检。默认10，速度最快。")
     
     st.divider()
     st.header("🛡️ 2. 持仓监控 (卖)")
@@ -300,7 +298,7 @@ if not raw_df.empty:
     elif last_error:
         status_placeholder.warning(f"⚡ 网络波动 (使用缓存 {time_str})，系统正在后台重连...")
     else:
-        status_placeholder.success(f"✅ 系统正常运行 | 更新: {time_str} | 深度扫描模块已优化")
+        status_placeholder.success(f"✅ 系统正常运行 | 更新: {time_str} | 默认聚焦 Top 10")
 
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
@@ -334,14 +332,13 @@ if not raw_df.empty:
             display_result['Pos_Check'] = positions
             progress_bar.empty()
             
-            st.success("✅ 扫描完成。")
+            st.success(f"✅ 扫描完成 (Top {top_n})。")
             
-            # --- 修复：重新加入操作说明文案 ---
             st.info("""
             📋 **杨永兴操盘铁律 (战术面板)：**
             * **买入形态**：只看 [🚀 光头强] + [📈 多头排列] 的票。
             * **卖出纪律**：[🎯 建议卖出] 为止盈位；[🛑 止损价] 跌破必跑。
-            * **均线说明**：若显示“获取超时”，请稍等片刻再次刷新，服务器正在排队请求。
+            * **均线说明**：若显示“获取超时”，请稍等片刻再次刷新。
             """)
             
             st.dataframe(
