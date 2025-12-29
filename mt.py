@@ -16,7 +16,7 @@ else:
 
 # --- 2. 页面配置 ---
 st.set_page_config(
-    page_title="Speculative Capital Catcher v4.2: Full Version",
+    page_title="游资捕手 v5.0：深度体检版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -27,6 +27,7 @@ class YangStrategy:
     
     @staticmethod
     def get_market_data_silent(max_retries=3):
+        """第一步：全市场粗筛"""
         for i in range(max_retries):
             try:
                 df = ak.stock_zh_a_spot_em()
@@ -34,9 +35,10 @@ class YangStrategy:
                     '代码': 'Symbol', '名称': 'Name', '最新价': 'Price',
                     '涨跌幅': 'Change_Pct', '换手率': 'Turnover_Rate',
                     '量比': 'Volume_Ratio', '总市值': 'Market_Cap',
-                    '最高': 'High', '最低': 'Low', '今开': 'Open'
+                    '最高': 'High', '最低': 'Low', '今开': 'Open',
+                    '成交量': 'Volume', '成交额': 'Amount' # 需要用到成交额算均价
                 })
-                cols = ['Price', 'Change_Pct', 'Turnover_Rate', 'Volume_Ratio', 'Market_Cap', 'High', 'Low', 'Open']
+                cols = ['Price', 'Change_Pct', 'Turnover_Rate', 'Volume_Ratio', 'Market_Cap', 'High', 'Low', 'Open', 'Volume', 'Amount']
                 for col in cols:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                 return df, None
@@ -50,74 +52,108 @@ class YangStrategy:
         return pd.DataFrame(), "网络请求最终失败"
 
     @staticmethod
+    def deep_scan_stock(symbol, current_price):
+        """
+        第二步：单只股票深度体检 (耗时操作，只对Top N执行)
+        获取历史数据，判断均线和位置
+        """
+        try:
+            # 获取最近 30 天日线数据
+            hist_df = ak.stock_zh_a_hist(symbol=symbol, period="daily", adjust="qfq")
+            if hist_df.empty or len(hist_df) < 20:
+                return "⚪ 数据不足", "⚪ 数据不足"
+            
+            # 1. 计算均线
+            ma5 = hist_df['close'].rolling(5).mean().iloc[-1]
+            ma10 = hist_df['close'].rolling(10).mean().iloc[-1]
+            ma20 = hist_df['close'].rolling(20).mean().iloc[-1]
+            
+            trend_str = "⚪ 震荡/空头"
+            if ma5 > ma10 > ma20:
+                trend_str = "📈 多头排列(优)" # 均线发散向上
+            elif current_price < ma5:
+                trend_str = "📉 破5日线(弱)"
+            
+            # 2. 计算相对位置 (避开涨幅过大的妖股)
+            lowest_20 = hist_df['low'].tail(20).min()
+            position_ratio = current_price / lowest_20
+            
+            pos_str = "✅ 底部/腰部"
+            if position_ratio > 1.6:
+                pos_str = "⚠️ 高位风险" # 20天内涨了60%以上
+            
+            return trend_str, pos_str
+            
+        except:
+            return "⚪ 获取失败", "⚪ 获取失败"
+
+    @staticmethod
     def calculate_battle_plan(df):
         if df.empty: return df
-        # 计算作战价格
         df['Buy_Price'] = df['Price']
         df['Stop_Loss'] = df['Price'] * 0.97
         df['Target_Price'] = df['Price'] * 1.08
         
-        # 形态算法
+        # --- 基础形态 (K线) ---
         def analyze_morphology(row):
             if row['Price'] == 0: return "数据缺失"
-            pre_close = row['Price'] / (1 + row['Change_Pct'] / 100)
+            # 计算均价 (VWAP)
+            # 成交额(元) / (成交量(手) * 100)
+            avg_price = 0
+            if row['Volume'] > 0:
+                avg_price = row['Amount'] / (row['Volume'] * 100)
             
-            max_change_pct = 0
-            if pre_close > 0:
-                max_change_pct = (row['High'] - pre_close) / pre_close * 100
-            
+            vwap_status = ""
+            if avg_price > 0:
+                if row['Price'] > avg_price:
+                    vwap_status = "🌊 水上漂"
+                else:
+                    vwap_status = "🏊 水下(弱)"
+
+            # 计算K线
             upper_shadow = 0
             if row['Price'] > 0:
                 upper_shadow = (row['High'] - row['Price']) / row['Price']
             
+            # 综合判断
+            pre_close = row['Price'] / (1 + row['Change_Pct'] / 100)
+            max_change_pct = (row['High'] - pre_close) / pre_close * 100 if pre_close > 0 else 0
+
             if max_change_pct > 9.5 and row['Change_Pct'] < 9.0:
-                return "💣 炸板(大忌)"
-            
+                return f"💣 炸板 | {vwap_status}"
             if upper_shadow < 0.005 and row['Change_Pct'] > 3.0:
-                return "🚀 光头强(极品)"
-            
+                return f"🚀 光头强 | {vwap_status}"
             if upper_shadow > 0.02:
-                return "⚡ 长上影(抛压)"
+                return f"⚡ 长上影 | {vwap_status}"
             
-            if row['Price'] < row['Open']:
-                return "📉 假阴线(弱)"
-                
-            return "✅ 均势(正常)"
+            return f"✅ 均势 | {vwap_status}"
 
         df['Morphology'] = df.apply(analyze_morphology, axis=1)
 
-        # 胜率评分
+        # 胜率评分 (基础分)
         def calculate_win_score(row):
             score = 60
-            
             if row['Turnover_Rate'] > 15: score += 15
             elif row['Turnover_Rate'] > 10: score += 10
             elif row['Turnover_Rate'] > 7: score += 5
             
             if row['Volume_Ratio'] > 4.0: score += 10
             elif row['Volume_Ratio'] > 2.5: score += 8
-            elif row['Volume_Ratio'] > 1.8: score += 5
             
-            morph = row['Morphology']
-            if "光头强" in morph: score += 15     
-            elif "正常" in morph: score += 5
-            elif "长上影" in morph: score -= 15   
-            elif "炸板" in morph: score -= 30     
-            elif "假阴线" in morph: score -= 10
+            # 均价线加分
+            if "水上漂" in row['Morphology']: score += 10
+            else: score -= 10
+            
+            # 形态加分
+            if "光头强" in row['Morphology']: score += 15
+            elif "长上影" in row['Morphology']: score -= 15
+            elif "炸板" in row['Morphology']: score -= 30
             
             if 4.0 <= row['Change_Pct'] <= 8.5: score += 5
             
             return min(max(score, 0), 99)
 
         df['Win_Score'] = df.apply(calculate_win_score, axis=1)
-        
-        def final_advice(row):
-            if "炸板" in row['Morphology']: return "❌ 严禁买入"
-            if "长上影" in row['Morphology']: return "⚠️ 观望为主"
-            if "光头强" in row['Morphology']: return "🟢 重点出击"
-            return "⚪ 酌情参与"
-            
-        df['Advice_Summary'] = df.apply(final_advice, axis=1)
         return df
 
     @staticmethod
@@ -128,22 +164,18 @@ class YangStrategy:
         for _, row in holdings_df.iterrows():
             reason = []
             status = "持仓观察"
-            color = "#e6f3ff"
-            border_color = "#ccc"
+            color = "#e6f3ff"; border_color = "#ccc"
 
             if row['Change_Pct'] < -3.0:
-                status = "🛑 止损卖出"
-                reason.append("触及-3%止损线")
+                status = "🛑 止损卖出"; reason.append("触及-3%止损线")
                 color = "#ffe6e6"; border_color = "red"
             elif row['High'] > 0:
                 drawdown = (row['High'] - row['Price']) / row['High'] * 100
                 if row['Change_Pct'] > 0 and drawdown > 4.0:
-                    status = "💰 止盈/避险"
-                    reason.append(f"回撤{drawdown:.1f}%，疑似出货")
+                    status = "💰 止盈/避险"; reason.append(f"回撤{drawdown:.1f}%")
                     color = "#fff5e6"; border_color = "orange"
                 elif row['Change_Pct'] < 0 and row['Price'] < row['Open']:
-                    status = "⚠️ 弱势预警"
-                    reason.append("水下震荡")
+                    status = "⚠️ 弱势预警"; reason.append("水下震荡")
                     color = "#ffffcc"; border_color = "#cccc00"
             
             signals.append({
@@ -215,7 +247,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- 5. UI 界面 ---
-st.title("🦅 Speculative Capital Catcher v4.2: Full Version")
+st.title("🦅 游资捕手 v5.0：深度体检版")
 
 with st.sidebar:
     st.header("⚙️ 1. 选股参数 (买)")
@@ -227,7 +259,7 @@ with st.sidebar:
     min_vol_ratio = st.number_input("最低量比", 1.5)
     
     st.markdown("---")
-    top_n = st.slider("🎯 只展示分数前 N 名", 5, 50, 10)
+    top_n = st.slider("🎯 深度扫描前 N 名", 1, 20, 10, help="只对前N名进行历史均线和高位风险的深度联网核查，数量越多刷新越慢。")
     
     st.divider()
     st.header("🛡️ 2. 持仓监控 (卖)")
@@ -255,51 +287,64 @@ if not raw_df.empty:
     elif last_error:
         status_placeholder.warning(f"⚡ 网络波动 (使用缓存 {time_str})，系统正在后台重连...")
     else:
-        status_placeholder.success(f"✅ 系统正常运行 | 更新: {time_str} | 智能因子已激活")
+        status_placeholder.success(f"✅ 系统正常运行 | 更新: {time_str} | 智能体检已就绪")
 
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
     with tab1:
+        # 1. 粗筛
         full_result = YangStrategy.filter_stocks(raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio)
-        display_result = full_result.head(top_n)
+        # 2. 截取 Top N
+        display_result = full_result.head(top_n).copy() # Copy以免警告
         
         if len(display_result) > 0:
-            st.markdown(f"### 🏆 综合评分 Top {len(display_result)}")
+            st.markdown(f"### 🧬 正在对 Top {len(display_result)} 进行深度体检...")
+            progress_bar = st.progress(0)
             
-            st.info("""
-            📋 **形态选股口诀：** 首选 [🚀 光头强]；避开 [⚡ 长上影]；严禁 [💣 炸板]。
-            """)
+            # --- 3. 深度体检 (Deep Scan) ---
+            # 这一步是实时的，会有点慢，但为了精准度是值得的
+            trends = []
+            positions = []
             
-            # --- 恢复完整的列展示 ---
+            for i, (index, row) in enumerate(display_result.iterrows()):
+                # 实时拉取历史数据检测均线
+                t_str, p_str = YangStrategy.deep_scan_stock(row['Symbol'], row['Price'])
+                trends.append(t_str)
+                positions.append(p_str)
+                progress_bar.progress((i + 1) / len(display_result))
+            
+            display_result['Trend_Check'] = trends
+            display_result['Pos_Check'] = positions
+            progress_bar.empty() # 扫描完隐藏进度条
+            
+            st.success("✅ 深度扫描完成！请重点关注【多头排列 + 水上漂 + 光头强】的标的。")
+            
             st.dataframe(
                 display_result[[
                     'Symbol', 'Name', 
                     'Win_Score', 
-                    'Morphology',      # K线形态
-                    'Advice_Summary',  # 判官建议
+                    'Trend_Check',     # 新列: 均线趋势
+                    'Morphology',      # 包含K线+均价线状态
+                    'Pos_Check',       # 新列: 高位风险
                     'Price', 'Change_Pct', 
-                    'Buy_Price',       # 建议买入 (已恢复)
-                    'Target_Price',    # 建议卖出 (已恢复)
-                    'Stop_Loss',       # 止损价 (已恢复)
-                    'Turnover_Rate', 'Volume_Ratio'
+                    'Buy_Price', 'Target_Price', 'Stop_Loss', 
+                    'Turnover_Rate'
                 ]],
                 column_config={
                     "Symbol": "代码", "Name": "名称",
                     "Win_Score": st.column_config.ProgressColumn("🔥 胜率分", format="%d", min_value=0, max_value=100),
                     
-                    "Morphology": st.column_config.TextColumn("📊 K线形态", width="medium"),
-                    "Advice_Summary": st.column_config.TextColumn("🤖 判官建议", width="small"),
+                    # --- 深度体检结果展示 ---
+                    "Trend_Check": st.column_config.TextColumn("📈 日线均线", help="检测5/10/20日均线是否多头排列"),
+                    "Morphology": st.column_config.TextColumn("📊 分时/形态", help="光头强=强势; 水上漂=在均价线上方"),
+                    "Pos_Check": st.column_config.TextColumn("⛰️ 位置风险", help="是否短期涨幅过大"),
                     
                     "Price": st.column_config.NumberColumn("现价", format="¥%.2f"),
                     "Change_Pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
-                    
-                    # --- 核心交易价格 ---
                     "Buy_Price": st.column_config.NumberColumn("建议买入", format="¥%.2f"),
-                    "Target_Price": st.column_config.NumberColumn("🎯 建议卖出", format="¥%.2f", help="短线止盈目标"),
-                    "Stop_Loss": st.column_config.NumberColumn("🛑 止损价", format="¥%.2f", help="铁律：跌破必走"),
-                    
+                    "Target_Price": st.column_config.NumberColumn("🎯 建议卖出", format="¥%.2f"),
+                    "Stop_Loss": st.column_config.NumberColumn("🛑 止损价", format="¥%.2f"),
                     "Turnover_Rate": st.column_config.ProgressColumn("换手", format="%.1f%%", min_value=0, max_value=20),
-                    "Volume_Ratio": st.column_config.NumberColumn("量比", format="%.1f")
                 },
                 hide_index=True,
                 use_container_width=True
