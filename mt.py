@@ -16,7 +16,7 @@ else:
 
 # --- 2. 页面配置 ---
 st.set_page_config(
-    page_title="Speculative Capital Catcher v4.0",
+    page_title="游资捕手 v4.1：形态雷达版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -27,9 +27,6 @@ class YangStrategy:
     
     @staticmethod
     def get_market_data_silent(max_retries=3):
-        """
-        数据获取函数
-        """
         for i in range(max_retries):
             try:
                 df = ak.stock_zh_a_spot_em()
@@ -44,7 +41,6 @@ class YangStrategy:
                     df[col] = pd.to_numeric(df[col], errors='coerce')
                 return df, None
             except Exception as e:
-                # 失败重试间隔 (3s -> 6s -> 9s)
                 sleep_time = (i + 1) * 3
                 if i < max_retries - 1:
                     time.sleep(sleep_time)
@@ -60,44 +56,86 @@ class YangStrategy:
         df['Stop_Loss'] = df['Price'] * 0.97
         df['Target_Price'] = df['Price'] * 1.08
         
-        # 风控建议
-        def assess_risk_for_buyers(row):
-            drawdown = 0
-            if row['High'] > 0:
-                drawdown = (row['High'] - row['Price']) / row['High'] * 100
+        # --- 核心升级：形态算法 (Morphology) ---
+        def analyze_morphology(row):
+            # 1. 计算昨收盘 (反推)
+            if row['Price'] == 0: return "数据缺失"
+            pre_close = row['Price'] / (1 + row['Change_Pct'] / 100)
             
-            if row['Change_Pct'] > 9.5: return "🔥 强势封板"
-            elif drawdown > 4.0: return "⚠️ 冲高回落(慎追)"
-            elif row['Price'] < row['Open']: return "⚠️ 假阴线(需观察)"
-            else: return "🟢 趋势向上(可击)"
+            # 2. 计算最高涨幅 (判断是否摸过涨停)
+            max_change_pct = 0
+            if pre_close > 0:
+                max_change_pct = (row['High'] - pre_close) / pre_close * 100
             
-        df['Risk_Advice'] = df.apply(assess_risk_for_buyers, axis=1)
+            # 3. 计算上影线长度 (回撤幅度)
+            # (最高 - 现价) / 现价
+            upper_shadow = 0
+            if row['Price'] > 0:
+                upper_shadow = (row['High'] - row['Price']) / row['Price']
+            
+            # --- 判定逻辑 ---
+            
+            # A. 炸板：摸过涨停(>9.5%)，但现在没封住(<9.5%)
+            # 这种票套牢盘极重，绝对要避开
+            if max_change_pct > 9.5 and row['Change_Pct'] < 9.0:
+                return "💣 炸板(大忌)"
+            
+            # B. 光头强：收盘价极度接近最高价 (回撤 < 0.5%)
+            # 说明多头一直买到收盘，明天高开概率大
+            if upper_shadow < 0.005 and row['Change_Pct'] > 3.0:
+                return "🚀 光头强(极品)"
+            
+            # C. 长上影：冲高回落 (>2%)
+            # 说明上方抛压大，形态难看
+            if upper_shadow > 0.02:
+                return "⚡ 长上影(抛压)"
+            
+            # D. 假阴线：虽然涨了，但比开盘价低
+            if row['Price'] < row['Open']:
+                return "📉 假阴线(弱)"
+                
+            return "✅ 均势(正常)"
 
-        # 胜率评分 (Yang Score)
+        df['Morphology'] = df.apply(analyze_morphology, axis=1)
+
+        # --- 胜率评分 (Yang Score) 升级 ---
         def calculate_win_score(row):
             score = 60
+            
+            # 1. 换手率 (40分)
             if row['Turnover_Rate'] > 15: score += 15
             elif row['Turnover_Rate'] > 10: score += 10
             elif row['Turnover_Rate'] > 7: score += 5
             
+            # 2. 量比 (30分)
             if row['Volume_Ratio'] > 4.0: score += 10
             elif row['Volume_Ratio'] > 2.5: score += 8
             elif row['Volume_Ratio'] > 1.8: score += 5
             
-            if 4.0 <= row['Change_Pct'] <= 8.0: score += 10
-            elif 2.0 <= row['Change_Pct'] < 4.0: score += 5
+            # 3. 形态加权 (20分) - 联动上面的算法
+            morph = row['Morphology']
+            if "光头强" in morph: score += 15     # 极品形态加分
+            elif "正常" in morph: score += 5
+            elif "长上影" in morph: score -= 15   # 难看形态重罚
+            elif "炸板" in morph: score -= 30     # 炸板直接废掉
+            elif "假阴线" in morph: score -= 10
             
-            mkt_cap_b = row['Market_Cap'] / 100000000
-            if mkt_cap_b < 100: score += 5
+            # 4. 黄金区间
+            if 4.0 <= row['Change_Pct'] <= 8.5: score += 5
             
-            drawdown = 0
-            if row['High'] > 0:
-                drawdown = (row['High'] - row['Price']) / row['High'] * 100
-            if drawdown > 3.0: score -= 15 
-            
-            return min(score, 99)
+            return min(max(score, 0), 99) # 0-99分
 
         df['Win_Score'] = df.apply(calculate_win_score, axis=1)
+        
+        # 优化风控建议文案，避免重复
+        def final_advice(row):
+            if "炸板" in row['Morphology']: return "❌ 严禁买入"
+            if "长上影" in row['Morphology']: return "⚠️ 观望为主"
+            if "光头强" in row['Morphology']: return "🟢 重点出击"
+            return "⚪ 酌情参与"
+            
+        df['Advice_Summary'] = df.apply(final_advice, axis=1)
+        
         return df
 
     @staticmethod
@@ -174,7 +212,6 @@ class BackgroundEngine:
                         self.error_count = 0   
                     elif error_msg:
                         self.error_count += 1
-                        # 容错阈值提高到3次
                         if self.error_count >= 3:
                             self.last_error = error_msg
             except Exception as e:
@@ -183,8 +220,7 @@ class BackgroundEngine:
                     if self.error_count >= 3:
                         self.last_error = f"Loop Crash: {str(e)}"
             
-            # --- 核心修改：休息时间改为 180秒 (3分钟) ---
-            # 这是为了避免IP被封和接口超时最有效的手段
+            # 3分钟刷新一次
             time.sleep(180)
 
     def get_data(self):
@@ -198,7 +234,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- 5. UI 界面 ---
-st.title("🦅 Speculative Capital Catcher v4.0")
+st.title("🦅 游资捕手 v4.1：形态雷达版")
 
 with st.sidebar:
     st.header("⚙️ 1. 选股参数 (买)")
@@ -217,12 +253,9 @@ with st.sidebar:
     user_holdings = st.text_area("持仓代码 (逗号分隔)", value="603256,603986,002938,688795,001301,002837", height=70)
     
     st.divider()
-    # 按钮提示文案修改
     st.caption("后台自动刷新频率：**3分钟/次**")
-    if st.button("🚀 立即手动刷新", type="primary", help="如果你觉得3分钟太慢，可以随时点这个按钮强制读取最新数据"):
+    if st.button("🚀 立即手动刷新", type="primary"):
         st.rerun()
-        
-    # 前端页面自动刷新勾选
     if st.checkbox("页面自动同步 (每180s)", value=False):
         time.sleep(180)
         st.rerun()
@@ -233,8 +266,6 @@ raw_df, last_time, last_error = data_engine.get_data()
 
 if not raw_df.empty:
     time_str = last_time.strftime('%H:%M:%S')
-    
-    # 只有当数据滞后超过 5分钟 (300秒) 时才报警，因为现在正常间隔就是3分钟
     now = datetime.now(timezone(timedelta(hours=8)))
     is_stale = (now - last_time).total_seconds() > 300
     
@@ -243,7 +274,7 @@ if not raw_df.empty:
     elif last_error:
         status_placeholder.warning(f"⚡ 网络波动 (使用缓存 {time_str})，系统正在后台重连...")
     else:
-        status_placeholder.success(f"✅ 系统正常运行 | 数据更新于: {time_str} (每3分钟自动刷新)")
+        status_placeholder.success(f"✅ 系统正常运行 | 更新: {time_str} | 已启用“形态算法”识别主力意图")
 
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
@@ -253,24 +284,38 @@ if not raw_df.empty:
         
         if len(display_result) > 0:
             st.markdown(f"### 🏆 综合评分 Top {len(display_result)}")
-            st.info("📋 **操盘纪律：** 现价买入 -> 封板持有/炸板走 -> 明日竞价不红盘直接走。")
+            
+            # 操盘说明
+            st.info("""
+            📋 **形态选股口诀 (Morphology Guide)：**
+            1. **首选 [🚀 光头强]**：尾盘抢筹，没有上影线，明日溢价最高。
+            2. **避开 [⚡ 长上影]**：冲高回落，套牢盘重，容易低开。
+            3. **严禁 [💣 炸板]**：涨停被砸，主力出逃，接飞刀必死。
+            """)
             
             st.dataframe(
                 display_result[[
                     'Symbol', 'Name', 
-                    'Win_Score', 'Price', 'Change_Pct', 
-                    'Risk_Advice', 'Buy_Price', 'Target_Price', 'Stop_Loss', 
+                    'Win_Score', 
+                    'Morphology',      # <--- 核心新列：K线形态
+                    'Advice_Summary',  # <--- 核心新列：直接建议
+                    'Price', 'Change_Pct', 
                     'Turnover_Rate', 'Volume_Ratio'
                 ]],
                 column_config={
                     "Symbol": "代码", "Name": "名称",
                     "Win_Score": st.column_config.ProgressColumn("🔥 胜率分", format="%d", min_value=0, max_value=100),
+                    
+                    # --- 形态可视化 ---
+                    "Morphology": st.column_config.TextColumn(
+                        "📊 K线形态", 
+                        help="通过最高价与收盘价计算。光头强=最强；长上影=有抛压。",
+                        width="medium"
+                    ),
+                    "Advice_Summary": st.column_config.TextColumn("🤖 判官建议", width="small"),
+                    
                     "Price": st.column_config.NumberColumn("现价", format="¥%.2f"),
                     "Change_Pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
-                    "Risk_Advice": st.column_config.TextColumn("⚡ 实时风控", width="medium"),
-                    "Buy_Price": st.column_config.NumberColumn("建议买入", format="¥%.2f"),
-                    "Target_Price": st.column_config.NumberColumn("🎯 建议卖出", format="¥%.2f"),
-                    "Stop_Loss": st.column_config.NumberColumn("🛑 止损价", format="¥%.2f"),
                     "Turnover_Rate": st.column_config.ProgressColumn("换手", format="%.1f%%", min_value=0, max_value=20),
                     "Volume_Ratio": st.column_config.NumberColumn("量比", format="%.1f")
                 },
@@ -304,6 +349,6 @@ if not raw_df.empty:
             st.info("请输入持仓代码。")
 else:
     if last_error:
-         st.error(f"❌ 首次连接失败: {last_error}。建议检查网络。")
+         st.error(f"❌ 首次连接失败: {last_error}")
     else:
         status_placeholder.info("⏳ 正在建立连接 (3-5秒)...")
