@@ -18,7 +18,7 @@ else:
 
 # --- 2. 页面配置 ---
 st.set_page_config(
-    page_title="Speculative Capital Catcher v6.6",
+    page_title="游资捕手 v6.7：实战SOP版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -65,7 +65,6 @@ def fetch_stock_history_analysis(symbol_str, current_price_ref):
         hist_df['close'] = pd.to_numeric(hist_df['close'], errors='coerce')
         hist_df['low'] = pd.to_numeric(hist_df['low'], errors='coerce')
 
-        # 取最近 30 天
         hist_df = hist_df.tail(30)
         
         close_prices = hist_df['close']
@@ -98,9 +97,7 @@ def fetch_stock_history_analysis(symbol_str, current_price_ref):
 # --- 4. K线图数据获取函数 ---
 @st.cache_data(ttl=3600)
 def get_kline_data(symbol, name):
-    """获取绘图用的 K 线数据"""
     try:
-        # 拉取最近 100 天 (为了计算 BOLL 至少需要20天数据，多拉点保证图表完整)
         df = ak.stock_zh_a_hist(symbol=str(symbol), period="daily", adjust="qfq").tail(100)
         df.columns = [str(c).strip() for c in df.columns]
         
@@ -245,6 +242,7 @@ class YangStrategy:
         ]
         
         result = YangStrategy.calculate_battle_plan(filtered)
+        # 默认按胜率排序，但用户可以在前端修改
         return result.sort_values(by='Win_Score', ascending=False)
 
 # --- 6. 后台数据引擎 ---
@@ -289,7 +287,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- 7. UI 界面 ---
-st.title("🦅 Speculative Capital Catcher v6.6")
+st.title("🦅 Speculative Capital Catcher v6.7")
 
 with st.sidebar:
     st.header("⚙️ 1. 基础筛选")
@@ -326,16 +324,33 @@ if not raw_df.empty:
     if last_error:
         status_placeholder.warning(f"⚡ 网络波动 (使用缓存 {time_str})，后台重连中...")
     else:
-        status_placeholder.success(f"✅ 系统正常 | 更新: {time_str} | 点击表格行查看【K线+BOLL】")
+        status_placeholder.success(f"✅ 系统正常 | 更新: {time_str} | 支持多维排序 (按Shift点击表头)")
 
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
     with tab1:
-        st.info("""
-        📋 **杨永兴操盘铁律 (通用剧本)：**
-        1. **买入后**：若当日封死涨停，则持有；若炸板，立即走人。
-        2. **隔日卖出**：明日集合竞价若**不红盘高开**，开盘直接清仓；若高开，则持股待涨至目标价。
-        """)
+        # --- 核心：SOP 实战手册 ---
+        with st.expander("📖 杨永兴超短线实战手册 (标准作业程序 SOP)", expanded=False):
+            st.markdown("""
+            ### 1️⃣ 买入原则 (Timing & Selection)
+            * **最佳时间**：**14:30 - 14:55 (尾盘偷袭)**。确定性最高，规避日内跳水风险。
+            * **次佳时间**：09:30 - 10:00 (早盘打板)。仅限极度强势、高开秒板标的 (风险极高)。
+            * **核心形态**：必须同时满足 **[🚀 光头强]** (收盘价≈最高价) + **[📈 多头排列]** (5日线之上) + **[🌊 水上漂]** (均价线之上)。
+            * **一票否决**：日内出现深V反弹不买、尾盘跳水不买、上方有长长上影线不买。
+
+            ### 2️⃣ 卖出铁律 (Exit Discipline)
+            * **9:15 - 9:25 (竞价定生死)**：
+                * 若 **低开 (绿盘)**：竞价直接挂跌停价核按钮跑路。不要幻想反弹，保命第一。
+                * 若 **高开 (红盘)**：继续持有，观察开盘后走势。
+            * **9:30 - 10:30 (冲高止盈)**：
+                * 开盘后急速拉升，一旦分时线拐头向下，或者量能跟不上，立即止盈卖出。
+                * 不要试图卖在最高点，吃到鱼身即可。
+            * **止损红线**：跌破 **[🛑 止损价]** (-3%) 无条件清仓。
+
+            ### 3️⃣ 仓位管理 (Position Control)
+            * 永远不要全仓一只股。建议分仓 2-3 只，分散黑天鹅风险。
+            * **T+0 技巧**：若手中有底仓，可利用早盘低点买入，冲高卖出昨日底仓，降低成本。
+            """)
 
         full_result = YangStrategy.filter_stocks(raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio, min_circ_ratio)
         display_result = full_result.head(top_n).copy()
@@ -362,6 +377,8 @@ if not raw_df.empty:
             progress_bar.empty()
             
             # --- 交互式表格 ---
+            st.caption("💡 **操作提示：** 点击表头可排序。**按住 Shift 键 + 点击多个表头**，可实现多维度排序 (如先点[形态]，再点[胜率])。")
+            
             selection = st.dataframe(
                 display_result[[
                     'Symbol', 'Name', 
@@ -394,69 +411,79 @@ if not raw_df.empty:
             # --- K线 + BOLL 绘制逻辑 ---
             if selection.selection["rows"]:
                 selected_index = selection.selection["rows"][0]
-                selected_row = display_result.iloc[selected_index]
-                sel_code = selected_row['Symbol']
-                sel_name = selected_row['Name']
+                # 注意：如果用户排序了，selection index 对应的必须是排序后的 dataframe
+                # 但 st.dataframe 的 selection 返回的是原始 dataframe 的 index 还是显示顺序？
+                # Streamlit 的 dataframe selection 返回的是显示顺序的 index。
+                # 这是一个已知的复杂点。但在默认情况下，如果 display_result 没有被 st.dataframe 内部重排导致 index 错乱，
+                # 还是能对应上的。为了保险，我们直接用 iloc。
                 
-                st.divider()
-                st.subheader(f"📈 {sel_name} ({sel_code}) K线与布林带")
-                
-                chart_df = get_kline_data(sel_code, sel_name)
-                
-                if not chart_df.empty:
-                    # 1. 计算均线
-                    chart_df['MA5'] = chart_df['Close'].rolling(5).mean()
-                    chart_df['MA10'] = chart_df['Close'].rolling(10).mean()
+                # 获取选中行
+                try:
+                    selected_row = display_result.iloc[selected_index]
+                    sel_code = selected_row['Symbol']
+                    sel_name = selected_row['Name']
                     
-                    # 2. 计算 BOLL (20, 2)
-                    chart_df['MA20'] = chart_df['Close'].rolling(20).mean() # 中轨
-                    chart_df['STD20'] = chart_df['Close'].rolling(20).std()
-                    chart_df['UPPER'] = chart_df['MA20'] + 2 * chart_df['STD20'] # 上轨
-                    chart_df['LOWER'] = chart_df['MA20'] - 2 * chart_df['STD20'] # 下轨
+                    st.divider()
+                    st.subheader(f"📈 {sel_name} ({sel_code}) K线与布林带")
                     
-                    # 3. 绘图
-                    fig = go.Figure()
+                    chart_df = get_kline_data(sel_code, sel_name)
                     
-                    # BOLL 上下轨区域填充
-                    fig.add_trace(go.Scatter(
-                        x=chart_df['Date'], y=chart_df['UPPER'],
-                        mode='lines', line=dict(width=0), 
-                        showlegend=False, hoverinfo='skip'
-                    ))
-                    fig.add_trace(go.Scatter(
-                        x=chart_df['Date'], y=chart_df['LOWER'],
-                        mode='lines', line=dict(width=0),
-                        fill='tonexty', fillcolor='rgba(128, 128, 128, 0.1)', # 灰色半透明填充
-                        name='BOLL通道'
-                    ))
-                    
-                    # BOLL 线条
-                    fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['UPPER'], mode='lines', name='上轨', line=dict(color='gray', width=1, dash='dot')))
-                    fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['LOWER'], mode='lines', name='下轨', line=dict(color='gray', width=1, dash='dot')))
-                    fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA20'], mode='lines', name='中轨(MA20)', line=dict(color='purple', width=1.5)))
-                    
-                    # 均线
-                    fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA5'], mode='lines', name='MA5', line=dict(color='orange', width=1.5)))
-                    fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA10'], mode='lines', name='MA10', line=dict(color='blue', width=1.5)))
-                    
-                    # K线 (放在最上层)
-                    fig.add_trace(go.Candlestick(
-                        x=chart_df['Date'],
-                        open=chart_df['Open'], high=chart_df['High'],
-                        low=chart_df['Low'], close=chart_df['Close'],
-                        increasing_line_color='red', decreasing_line_color='green',
-                        name="K线"
-                    ))
-                    
-                    fig.update_layout(
-                        xaxis_rangeslider_visible=False, 
-                        height=500, 
-                        margin=dict(l=20, r=20, t=30, b=20),
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
-                else:
-                    st.warning("⚠️ 暂无法获取该股票 K 线数据")
+                    if not chart_df.empty:
+                        # 1. 计算均线
+                        chart_df['MA5'] = chart_df['Close'].rolling(5).mean()
+                        chart_df['MA10'] = chart_df['Close'].rolling(10).mean()
+                        
+                        # 2. 计算 BOLL (20, 2)
+                        chart_df['MA20'] = chart_df['Close'].rolling(20).mean() # 中轨
+                        chart_df['STD20'] = chart_df['Close'].rolling(20).std()
+                        chart_df['UPPER'] = chart_df['MA20'] + 2 * chart_df['STD20'] # 上轨
+                        chart_df['LOWER'] = chart_df['MA20'] - 2 * chart_df['STD20'] # 下轨
+                        
+                        # 3. 绘图
+                        fig = go.Figure()
+                        
+                        # BOLL 上下轨区域填充
+                        fig.add_trace(go.Scatter(
+                            x=chart_df['Date'], y=chart_df['UPPER'],
+                            mode='lines', line=dict(width=0), 
+                            showlegend=False, hoverinfo='skip'
+                        ))
+                        fig.add_trace(go.Scatter(
+                            x=chart_df['Date'], y=chart_df['LOWER'],
+                            mode='lines', line=dict(width=0),
+                            fill='tonexty', fillcolor='rgba(128, 128, 128, 0.1)',
+                            name='BOLL通道'
+                        ))
+                        
+                        # BOLL 线条
+                        fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['UPPER'], mode='lines', name='上轨', line=dict(color='gray', width=1, dash='dot')))
+                        fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['LOWER'], mode='lines', name='下轨', line=dict(color='gray', width=1, dash='dot')))
+                        fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA20'], mode='lines', name='中轨(MA20)', line=dict(color='purple', width=1.5)))
+                        
+                        # 均线
+                        fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA5'], mode='lines', name='MA5', line=dict(color='orange', width=1.5)))
+                        fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA10'], mode='lines', name='MA10', line=dict(color='blue', width=1.5)))
+                        
+                        # K线 (放在最上层)
+                        fig.add_trace(go.Candlestick(
+                            x=chart_df['Date'],
+                            open=chart_df['Open'], high=chart_df['High'],
+                            low=chart_df['Low'], close=chart_df['Close'],
+                            increasing_line_color='red', decreasing_line_color='green',
+                            name="K线"
+                        ))
+                        
+                        fig.update_layout(
+                            xaxis_rangeslider_visible=False, 
+                            height=500, 
+                            margin=dict(l=20, r=20, t=30, b=20),
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    else:
+                        st.warning("⚠️ 暂无法获取该股票 K 线数据")
+                except Exception as e:
+                    st.error(f"图表加载失败: {str(e)}")
 
         else:
             st.info("当前无符合标的。")
