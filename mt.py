@@ -5,7 +5,7 @@ import time
 import threading
 import ssl
 import random
-import plotly.graph_objects as go # 引入绘图库
+import plotly.graph_objects as go 
 from datetime import datetime, timedelta, timezone
 
 # --- 1. SSL 补丁 ---
@@ -18,7 +18,7 @@ else:
 
 # --- 2. 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v6.5：交互看盘版",
+    page_title="游资捕手 v6.6：全能图表版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -28,7 +28,6 @@ st.set_page_config(
 @st.cache_data(ttl=14400, show_spinner=False)
 def fetch_stock_history_analysis(symbol_str, current_price_ref):
     symbol_str = str(symbol_str)
-    # 随机延迟防封
     time.sleep(random.uniform(1.0, 2.0))
     
     error_log = ""
@@ -96,16 +95,15 @@ def fetch_stock_history_analysis(symbol_str, current_price_ref):
     except Exception as e:
         return f"⚠️ 算力错", f"⚠️ Check"
 
-# --- 4. K线图数据获取函数 (新功能) ---
+# --- 4. K线图数据获取函数 ---
 @st.cache_data(ttl=3600)
 def get_kline_data(symbol, name):
     """获取绘图用的 K 线数据"""
     try:
-        # 拉取最近 60 天
-        df = ak.stock_zh_a_hist(symbol=str(symbol), period="daily", adjust="qfq").tail(60)
+        # 拉取最近 100 天 (为了计算 BOLL 至少需要20天数据，多拉点保证图表完整)
+        df = ak.stock_zh_a_hist(symbol=str(symbol), period="daily", adjust="qfq").tail(100)
         df.columns = [str(c).strip() for c in df.columns]
         
-        # 统一列名
         rename_map = {}
         for c in df.columns:
             if "日期" in c: rename_map[c] = 'Date'
@@ -195,9 +193,7 @@ class YangStrategy:
             if "光头强" in row['Morphology']: score += 15
             elif "长上影" in row['Morphology']: score -= 15
             elif "炸板" in row['Morphology']: score -= 30
-            # 使用已存在的列
             if row['Circulating_Ratio'] > 80: score += 5
-            
             if 4.0 <= row['Change_Pct'] <= 8.5: score += 5
             return min(max(score, 0), 99)
 
@@ -235,7 +231,6 @@ class YangStrategy:
     def filter_stocks(df, max_cap, min_turnover, min_change, max_change, min_vol_ratio, min_circ_ratio):
         if df.empty: return df
         
-        # --- 核心修复：先计算，再筛选 (解决 KeyError) ---
         df['Market_Cap_Billions'] = df['Market_Cap'] / 100000000
         df['Market_Cap'] = df['Market_Cap'].replace(0, 1)
         df['Circulating_Ratio'] = (df['Circulating_Cap'] / df['Market_Cap']) * 100
@@ -294,7 +289,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- 7. UI 界面 ---
-st.title("🦅 游资捕手 v6.5：交互看盘版")
+st.title("🦅 游资捕手 v6.6：全能图表版")
 
 with st.sidebar:
     st.header("⚙️ 1. 基础筛选")
@@ -331,12 +326,11 @@ if not raw_df.empty:
     if last_error:
         status_placeholder.warning(f"⚡ 网络波动 (使用缓存 {time_str})，后台重连中...")
     else:
-        status_placeholder.success(f"✅ 系统正常 | 更新: {time_str} | 点击表格行可查看K线")
+        status_placeholder.success(f"✅ 系统正常 | 更新: {time_str} | 点击表格行查看【K线+BOLL】")
 
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
     with tab1:
-        # --- 恢复原版文案 ---
         st.info("""
         📋 **杨永兴操盘铁律 (通用剧本)：**
         1. **买入后**：若当日封死涨停，则持有；若炸板，立即走人。
@@ -367,7 +361,7 @@ if not raw_df.empty:
             display_result['Pos_Check'] = positions
             progress_bar.empty()
             
-            # --- 新增：交互式表格 ---
+            # --- 交互式表格 ---
             selection = st.dataframe(
                 display_result[[
                     'Symbol', 'Name', 
@@ -393,11 +387,11 @@ if not raw_df.empty:
                 },
                 hide_index=True,
                 use_container_width=True,
-                selection_mode="single-row", # 开启单行选择
-                on_select="rerun"            # 选中后立即刷新页面以显示K线
+                selection_mode="single-row", 
+                on_select="rerun"            
             )
             
-            # --- K线图绘制逻辑 ---
+            # --- K线 + BOLL 绘制逻辑 ---
             if selection.selection["rows"]:
                 selected_index = selection.selection["rows"][0]
                 selected_row = display_result.iloc[selected_index]
@@ -405,28 +399,61 @@ if not raw_df.empty:
                 sel_name = selected_row['Name']
                 
                 st.divider()
-                st.subheader(f"📈 {sel_name} ({sel_code}) 日K线分析")
+                st.subheader(f"📈 {sel_name} ({sel_code}) K线与布林带")
                 
                 chart_df = get_kline_data(sel_code, sel_name)
                 
                 if not chart_df.empty:
-                    # 绘制 Plotly 蜡烛图
-                    fig = go.Figure(data=[go.Candlestick(
+                    # 1. 计算均线
+                    chart_df['MA5'] = chart_df['Close'].rolling(5).mean()
+                    chart_df['MA10'] = chart_df['Close'].rolling(10).mean()
+                    
+                    # 2. 计算 BOLL (20, 2)
+                    chart_df['MA20'] = chart_df['Close'].rolling(20).mean() # 中轨
+                    chart_df['STD20'] = chart_df['Close'].rolling(20).std()
+                    chart_df['UPPER'] = chart_df['MA20'] + 2 * chart_df['STD20'] # 上轨
+                    chart_df['LOWER'] = chart_df['MA20'] - 2 * chart_df['STD20'] # 下轨
+                    
+                    # 3. 绘图
+                    fig = go.Figure()
+                    
+                    # BOLL 上下轨区域填充
+                    fig.add_trace(go.Scatter(
+                        x=chart_df['Date'], y=chart_df['UPPER'],
+                        mode='lines', line=dict(width=0), 
+                        showlegend=False, hoverinfo='skip'
+                    ))
+                    fig.add_trace(go.Scatter(
+                        x=chart_df['Date'], y=chart_df['LOWER'],
+                        mode='lines', line=dict(width=0),
+                        fill='tonexty', fillcolor='rgba(128, 128, 128, 0.1)', # 灰色半透明填充
+                        name='BOLL通道'
+                    ))
+                    
+                    # BOLL 线条
+                    fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['UPPER'], mode='lines', name='上轨', line=dict(color='gray', width=1, dash='dot')))
+                    fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['LOWER'], mode='lines', name='下轨', line=dict(color='gray', width=1, dash='dot')))
+                    fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA20'], mode='lines', name='中轨(MA20)', line=dict(color='purple', width=1.5)))
+                    
+                    # 均线
+                    fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA5'], mode='lines', name='MA5', line=dict(color='orange', width=1.5)))
+                    fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA10'], mode='lines', name='MA10', line=dict(color='blue', width=1.5)))
+                    
+                    # K线 (放在最上层)
+                    fig.add_trace(go.Candlestick(
                         x=chart_df['Date'],
                         open=chart_df['Open'], high=chart_df['High'],
                         low=chart_df['Low'], close=chart_df['Close'],
                         increasing_line_color='red', decreasing_line_color='green',
                         name="K线"
-                    )])
+                    ))
                     
-                    # 计算绘图用均线
-                    chart_df['MA5'] = chart_df['Close'].rolling(5).mean()
-                    chart_df['MA10'] = chart_df['Close'].rolling(10).mean()
-                    
-                    fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA5'], mode='lines', name='MA5', line=dict(color='orange', width=1)))
-                    fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA10'], mode='lines', name='MA10', line=dict(color='blue', width=1)))
-                    
-                    fig.update_layout(xaxis_rangeslider_visible=False, height=400, margin=dict(l=20, r=20, t=30, b=20))
+                    fig.update_layout(
+                        xaxis_rangeslider_visible=False, 
+                        height=500, 
+                        margin=dict(l=20, r=20, t=30, b=20),
+                        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                    )
                     st.plotly_chart(fig, use_container_width=True)
                 else:
                     st.warning("⚠️ 暂无法获取该股票 K 线数据")
