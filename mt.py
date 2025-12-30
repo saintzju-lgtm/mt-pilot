@@ -18,13 +18,13 @@ else:
 
 # --- 2. 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v6.7：实战SOP版",
+    page_title="Speculative Capital Catcher v6.8",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# --- 3. 独立缓存函数 (深度体检) ---
+# --- 3. 独立缓存函数 ---
 @st.cache_data(ttl=14400, show_spinner=False)
 def fetch_stock_history_analysis(symbol_str, current_price_ref):
     symbol_str = str(symbol_str)
@@ -50,7 +50,6 @@ def fetch_stock_history_analysis(symbol_str, current_price_ref):
         return "❌ 接口空", "❌ 接口空"
     
     try:
-        # 列名清洗
         hist_df.columns = [str(c).strip() for c in hist_df.columns]
         close_col = None
         for col in hist_df.columns:
@@ -66,8 +65,8 @@ def fetch_stock_history_analysis(symbol_str, current_price_ref):
         hist_df['low'] = pd.to_numeric(hist_df['low'], errors='coerce')
 
         hist_df = hist_df.tail(30)
-        
         close_prices = hist_df['close']
+        
         ma5 = close_prices.rolling(5).mean().iloc[-1] if len(close_prices) >= 5 else 0
         ma10 = close_prices.rolling(10).mean().iloc[-1] if len(close_prices) >= 10 else 0
         
@@ -84,7 +83,6 @@ def fetch_stock_history_analysis(symbol_str, current_price_ref):
         if pd.isna(lowest_20) or lowest_20 == 0: lowest_20 = 0.01 
         
         position_ratio = current_price_ref / lowest_20
-        
         pos_str = "✅ 底部/腰部"
         if position_ratio > 1.6:
             pos_str = "⚠️ 高位(慎)" 
@@ -94,13 +92,12 @@ def fetch_stock_history_analysis(symbol_str, current_price_ref):
     except Exception as e:
         return f"⚠️ 算力错", f"⚠️ Check"
 
-# --- 4. K线图数据获取函数 ---
+# --- 4. K线图数据 ---
 @st.cache_data(ttl=3600)
 def get_kline_data(symbol, name):
     try:
         df = ak.stock_zh_a_hist(symbol=str(symbol), period="daily", adjust="qfq").tail(100)
         df.columns = [str(c).strip() for c in df.columns]
-        
         rename_map = {}
         for c in df.columns:
             if "日期" in c: rename_map[c] = 'Date'
@@ -153,7 +150,8 @@ class YangStrategy:
         df['Target_Price'] = df['Price'] * 1.08
         
         def analyze_morphology(row):
-            if row['Price'] == 0: return "数据缺失"
+            if row['Price'] == 0: return "数据缺失", 0 # 返回元组 (描述, 权重分)
+            
             avg_price = 0
             if row['Volume'] > 0:
                 avg_price = row['Amount'] / (row['Volume'] * 100)
@@ -170,15 +168,22 @@ class YangStrategy:
             pre_close = row['Price'] / (1 + row['Change_Pct'] / 100)
             max_change_pct = (row['High'] - pre_close) / pre_close * 100 if pre_close > 0 else 0
 
+            # 增加返回一个 morph_score 用于排序
             if max_change_pct > 9.5 and row['Change_Pct'] < 9.0:
-                return f"💣 炸板 | {vwap_status}"
+                return f"💣 炸板 | {vwap_status}", -10
+            
             if upper_shadow < 0.005 and row['Change_Pct'] > 3.0:
-                return f"🚀 光头强 | {vwap_status}"
+                return f"🚀 光头强 | {vwap_status}", 10 # 最高优先级
+            
             if upper_shadow > 0.02:
-                return f"⚡ 长上影 | {vwap_status}"
-            return f"✅ 均势 | {vwap_status}"
+                return f"⚡ 长上影 | {vwap_status}", 0
+            
+            return f"✅ 均势 | {vwap_status}", 5
 
-        df['Morphology'] = df.apply(analyze_morphology, axis=1)
+        # 应用函数并拆分结果
+        morph_results = df.apply(analyze_morphology, axis=1)
+        df['Morphology'] = morph_results.apply(lambda x: x[0])
+        df['Morph_Score'] = morph_results.apply(lambda x: x[1]) # 隐藏列，用于排序
 
         def calculate_win_score(row):
             score = 60
@@ -225,7 +230,7 @@ class YangStrategy:
         return pd.DataFrame(signals)
 
     @staticmethod
-    def filter_stocks(df, max_cap, min_turnover, min_change, max_change, min_vol_ratio, min_circ_ratio):
+    def filter_stocks(df, max_cap, min_turnover, min_change, max_change, min_vol_ratio, min_circ_ratio, sort_method):
         if df.empty: return df
         
         df['Market_Cap_Billions'] = df['Market_Cap'] / 100000000
@@ -242,8 +247,19 @@ class YangStrategy:
         ]
         
         result = YangStrategy.calculate_battle_plan(filtered)
-        # 默认按胜率排序，但用户可以在前端修改
-        return result.sort_values(by='Win_Score', ascending=False)
+        
+        # --- 核心：后端多维排序 ---
+        if sort_method == "🔥 综合评分 (默认)":
+            return result.sort_values(by=['Win_Score', 'Turnover_Rate'], ascending=[False, False])
+        elif sort_method == "🚀 形态优先 (光头强)":
+            # 先按形态分(Morph_Score)，再按胜率分
+            return result.sort_values(by=['Morph_Score', 'Win_Score'], ascending=[False, False])
+        elif sort_method == "💰 资金优先 (换手)":
+            return result.sort_values(by=['Turnover_Rate', 'Win_Score'], ascending=[False, False])
+        elif sort_method == "🌊 抢筹优先 (量比)":
+            return result.sort_values(by=['Volume_Ratio', 'Win_Score'], ascending=[False, False])
+        else:
+            return result.sort_values(by='Win_Score', ascending=False)
 
 # --- 6. 后台数据引擎 ---
 class BackgroundEngine:
@@ -287,7 +303,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- 7. UI 界面 ---
-st.title("🦅 Speculative Capital Catcher v6.7")
+st.title("🦅 游资捕手 v6.8：主动排序版")
 
 with st.sidebar:
     st.header("⚙️ 1. 基础筛选")
@@ -300,13 +316,20 @@ with st.sidebar:
     st.header("⚖️ 2. 资金/结构")
     min_turnover = st.slider("最低换手率 (%)", 1.0, 15.0, 5.0)
     min_vol_ratio = st.number_input("最低量比 (建议>1.0)", 1.5)
-    min_circ_ratio = st.slider("最低流通盘占比 (%)", 0, 100, 50, help="筛选流通股占总股本比例。比例过低(<30%)通常意味着有大量限售股，流动性不真实，建议>50%。")
+    min_circ_ratio = st.slider("最低流通盘占比 (%)", 0, 100, 50)
     
     st.markdown("---")
+    # --- 新增：排序偏好 ---
+    st.header("📊 3. 排序偏好 (解决多选难)")
+    sort_method = st.selectbox(
+        "选择优先展示逻辑：",
+        ["🔥 综合评分 (默认)", "🚀 形态优先 (光头强)", "💰 资金优先 (换手)", "🌊 抢筹优先 (量比)"],
+        help="直接在后台进行多维度排序，比前端点击表头更稳定。"
+    )
     top_n = st.slider("🎯 展示前 N 名", 5, 50, 10)
     
     st.divider()
-    st.header("🛡️ 3. 持仓监控")
+    st.header("🛡️ 4. 持仓监控")
     user_holdings = st.text_area("持仓代码", value="603256,603986,002938,688795,001301,002837", height=70)
     
     st.divider()
@@ -324,39 +347,34 @@ if not raw_df.empty:
     if last_error:
         status_placeholder.warning(f"⚡ 网络波动 (使用缓存 {time_str})，后台重连中...")
     else:
-        status_placeholder.success(f"✅ 系统正常 | 更新: {time_str} | 支持多维排序 (按Shift点击表头)")
+        status_placeholder.success(f"✅ 系统正常 | 更新: {time_str} | 当前排序：{sort_method}")
 
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
     with tab1:
-        # --- 核心：SOP 实战手册 ---
         with st.expander("📖 杨永兴超短线实战手册 (标准作业程序 SOP)", expanded=False):
             st.markdown("""
             ### 1️⃣ 买入原则 (Timing & Selection)
             * **最佳时间**：**14:30 - 14:55 (尾盘偷袭)**。确定性最高，规避日内跳水风险。
             * **次佳时间**：09:30 - 10:00 (早盘打板)。仅限极度强势、高开秒板标的 (风险极高)。
             * **核心形态**：必须同时满足 **[🚀 光头强]** (收盘价≈最高价) + **[📈 多头排列]** (5日线之上) + **[🌊 水上漂]** (均价线之上)。
-            * **一票否决**：日内出现深V反弹不买、尾盘跳水不买、上方有长长上影线不买。
-
+            
             ### 2️⃣ 卖出铁律 (Exit Discipline)
             * **9:15 - 9:25 (竞价定生死)**：
                 * 若 **低开 (绿盘)**：竞价直接挂跌停价核按钮跑路。不要幻想反弹，保命第一。
                 * 若 **高开 (红盘)**：继续持有，观察开盘后走势。
             * **9:30 - 10:30 (冲高止盈)**：
                 * 开盘后急速拉升，一旦分时线拐头向下，或者量能跟不上，立即止盈卖出。
-                * 不要试图卖在最高点，吃到鱼身即可。
             * **止损红线**：跌破 **[🛑 止损价]** (-3%) 无条件清仓。
-
-            ### 3️⃣ 仓位管理 (Position Control)
-            * 永远不要全仓一只股。建议分仓 2-3 只，分散黑天鹅风险。
-            * **T+0 技巧**：若手中有底仓，可利用早盘低点买入，冲高卖出昨日底仓，降低成本。
             """)
 
-        full_result = YangStrategy.filter_stocks(raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio, min_circ_ratio)
+        full_result = YangStrategy.filter_stocks(
+            raw_df, max_cap, min_turnover, min_change, max_change, 
+            min_vol_ratio, min_circ_ratio, sort_method # 传入排序参数
+        )
         display_result = full_result.head(top_n).copy()
         
         if len(display_result) > 0:
-            
             trends = []
             positions = []
             progress_bar = st.progress(0)
@@ -377,8 +395,6 @@ if not raw_df.empty:
             progress_bar.empty()
             
             # --- 交互式表格 ---
-            st.caption("💡 **操作提示：** 点击表头可排序。**按住 Shift 键 + 点击多个表头**，可实现多维度排序 (如先点[形态]，再点[胜率])。")
-            
             selection = st.dataframe(
                 display_result[[
                     'Symbol', 'Name', 
@@ -411,13 +427,6 @@ if not raw_df.empty:
             # --- K线 + BOLL 绘制逻辑 ---
             if selection.selection["rows"]:
                 selected_index = selection.selection["rows"][0]
-                # 注意：如果用户排序了，selection index 对应的必须是排序后的 dataframe
-                # 但 st.dataframe 的 selection 返回的是原始 dataframe 的 index 还是显示顺序？
-                # Streamlit 的 dataframe selection 返回的是显示顺序的 index。
-                # 这是一个已知的复杂点。但在默认情况下，如果 display_result 没有被 st.dataframe 内部重排导致 index 错乱，
-                # 还是能对应上的。为了保险，我们直接用 iloc。
-                
-                # 获取选中行
                 try:
                     selected_row = display_result.iloc[selected_index]
                     sel_code = selected_row['Symbol']
@@ -429,56 +438,28 @@ if not raw_df.empty:
                     chart_df = get_kline_data(sel_code, sel_name)
                     
                     if not chart_df.empty:
-                        # 1. 计算均线
                         chart_df['MA5'] = chart_df['Close'].rolling(5).mean()
                         chart_df['MA10'] = chart_df['Close'].rolling(10).mean()
-                        
-                        # 2. 计算 BOLL (20, 2)
-                        chart_df['MA20'] = chart_df['Close'].rolling(20).mean() # 中轨
+                        chart_df['MA20'] = chart_df['Close'].rolling(20).mean() 
                         chart_df['STD20'] = chart_df['Close'].rolling(20).std()
-                        chart_df['UPPER'] = chart_df['MA20'] + 2 * chart_df['STD20'] # 上轨
-                        chart_df['LOWER'] = chart_df['MA20'] - 2 * chart_df['STD20'] # 下轨
+                        chart_df['UPPER'] = chart_df['MA20'] + 2 * chart_df['STD20']
+                        chart_df['LOWER'] = chart_df['MA20'] - 2 * chart_df['STD20'] 
                         
-                        # 3. 绘图
                         fig = go.Figure()
                         
-                        # BOLL 上下轨区域填充
-                        fig.add_trace(go.Scatter(
-                            x=chart_df['Date'], y=chart_df['UPPER'],
-                            mode='lines', line=dict(width=0), 
-                            showlegend=False, hoverinfo='skip'
-                        ))
-                        fig.add_trace(go.Scatter(
-                            x=chart_df['Date'], y=chart_df['LOWER'],
-                            mode='lines', line=dict(width=0),
-                            fill='tonexty', fillcolor='rgba(128, 128, 128, 0.1)',
-                            name='BOLL通道'
-                        ))
+                        fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['UPPER'], mode='lines', line=dict(width=0), showlegend=False, hoverinfo='skip'))
+                        fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['LOWER'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(128, 128, 128, 0.1)', name='BOLL通道'))
                         
-                        # BOLL 线条
                         fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['UPPER'], mode='lines', name='上轨', line=dict(color='gray', width=1, dash='dot')))
                         fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['LOWER'], mode='lines', name='下轨', line=dict(color='gray', width=1, dash='dot')))
                         fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA20'], mode='lines', name='中轨(MA20)', line=dict(color='purple', width=1.5)))
                         
-                        # 均线
                         fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA5'], mode='lines', name='MA5', line=dict(color='orange', width=1.5)))
                         fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA10'], mode='lines', name='MA10', line=dict(color='blue', width=1.5)))
                         
-                        # K线 (放在最上层)
-                        fig.add_trace(go.Candlestick(
-                            x=chart_df['Date'],
-                            open=chart_df['Open'], high=chart_df['High'],
-                            low=chart_df['Low'], close=chart_df['Close'],
-                            increasing_line_color='red', decreasing_line_color='green',
-                            name="K线"
-                        ))
+                        fig.add_trace(go.Candlestick(x=chart_df['Date'], open=chart_df['Open'], high=chart_df['High'], low=chart_df['Low'], close=chart_df['Close'], increasing_line_color='red', decreasing_line_color='green', name="K线"))
                         
-                        fig.update_layout(
-                            xaxis_rangeslider_visible=False, 
-                            height=500, 
-                            margin=dict(l=20, r=20, t=30, b=20),
-                            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-                        )
+                        fig.update_layout(xaxis_rangeslider_visible=False, height=500, margin=dict(l=20, r=20, t=30, b=20), legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1))
                         st.plotly_chart(fig, use_container_width=True)
                     else:
                         st.warning("⚠️ 暂无法获取该股票 K 线数据")
