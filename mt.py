@@ -17,37 +17,67 @@ else:
 
 # --- 2. 页面配置 ---
 st.set_page_config(
-    page_title="Speculative Capital Catcher v5.9",
+    page_title="游资捕手 v6.0：双通道诊疗版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
 )
 
-# --- 3. 独立缓存函数 ---
+# --- 3. 独立缓存函数 (含双通道重试机制) ---
 @st.cache_data(ttl=14400, show_spinner=False)
 def fetch_stock_history_analysis(symbol_str, current_price_ref):
     """
-    深度体检：带缓存，防限流
+    深度体检函数 v6.0
+    改进点：
+    1. 移除日期参数，防止格式错误
+    2. 增加不复权重试机制
+    3. 返回具体错误信息以便排查
     """
+    symbol_str = str(symbol_str)
+    
+    # 模拟随机延迟
+    time.sleep(random.uniform(1.0, 2.0))
+    
+    error_log = ""
+    hist_df = pd.DataFrame()
+
+    # --- 通道 A: 尝试获取前复权数据 (标准) ---
     try:
-        # 随机延迟 (1.0 - 2.0秒)
-        # 只有第一次联网时会等待，缓存命中后是0延迟
-        time.sleep(random.uniform(1.0, 2.0))
-        
-        # 拉取最近 3 个月数据
-        end_date = datetime.now().strftime("%Y%m%d")
-        start_date = (datetime.now() - timedelta(days=90)).strftime("%Y%m%d")
-        
         hist_df = ak.stock_zh_a_hist(
             symbol=symbol_str, 
             period="daily", 
-            start_date=start_date, 
-            end_date=end_date, 
-            adjust="qfq"
+            adjust="qfq" 
+            # 移除 start_date/end_date，改用默认拉取，提高成功率
         )
+    except Exception as e:
+        error_log = str(e)
+    
+    # --- 通道 B: 如果 A 失败，尝试不复权数据 (兼容) ---
+    if hist_df.empty:
+        try:
+            time.sleep(1) # 歇一秒再试
+            hist_df = ak.stock_zh_a_hist(
+                symbol=symbol_str, 
+                period="daily", 
+                adjust="" # 不复权
+            )
+        except Exception as e:
+            error_log = f"{error_log} | Retry: {str(e)}"
+
+    # --- 数据处理 ---
+    if hist_df.empty:
+        # ⚠️ 关键修改：返回具体的错误信息，而不是“暂无数据”
+        if "403" in error_log: return "⛔ IP被封", "⛔ IP被封"
+        if "timeout" in error_log.lower(): return "🐢 网络超时", "🐢 网络超时"
+        if "key" in error_log.lower(): return "🔑 数据解析误", "🔑 数据解析误"
         
-        if hist_df.empty or len(hist_df) < 5:
-            return "⚪ 数据不足", "⚪ 数据不足"
+        # 截取错误信息的前15个字符显示
+        short_err = error_log[:15] if error_log else "空数据"
+        return f"❌ {short_err}", f"❌ {short_err}"
+    
+    try:
+        # 只要最近 30 条
+        hist_df = hist_df.tail(30)
         
         # 1. 均线趋势
         close_prices = hist_df['close']
@@ -75,8 +105,8 @@ def fetch_stock_history_analysis(symbol_str, current_price_ref):
         
         return trend_str, pos_str
 
-    except Exception:
-        return "⚪ 暂无数据", "⚪ 稍后刷新"
+    except Exception as e:
+        return f"⚠️ 算力错误", f"⚠️ {str(e)[:10]}"
 
 # --- 4. 核心策略逻辑 ---
 class YangStrategy:
@@ -241,7 +271,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- 6. UI 界面 ---
-st.title("🦅 Speculative Capital Catcher v5.9")
+st.title("🦅 游资捕手 v6.0：双通道诊疗版")
 
 with st.sidebar:
     st.header("⚙️ 1. 选股参数 (买)")
@@ -253,8 +283,7 @@ with st.sidebar:
     min_vol_ratio = st.number_input("最低量比", 1.5)
     
     st.markdown("---")
-    # Top N 仅作为展示范围，不再作为限制
-    top_n = st.slider("🎯 展示前 N 名", 5, 50, 10, help="在这些股票中，所有‘光头强’都会被自动联网体检。")
+    top_n = st.slider("🎯 展示前 N 名", 5, 50, 10)
     
     st.divider()
     st.header("🛡️ 2. 持仓监控 (卖)")
@@ -282,7 +311,7 @@ if not raw_df.empty:
     elif last_error:
         status_placeholder.warning(f"⚡ 网络波动 (使用缓存 {time_str})，系统正在后台重连...")
     else:
-        status_placeholder.success(f"✅ 系统正常运行 | 更新: {time_str} | 智能缓存已激活 (0流量耗损)")
+        status_placeholder.success(f"✅ 系统正常运行 | 更新: {time_str} | 双通道诊疗已开启")
 
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
@@ -291,7 +320,7 @@ if not raw_df.empty:
         📋 **杨永兴操盘铁律 (战术面板)：**
         * **买入形态**：只看 [🚀 光头强] + [📈 多头排列] 的票。
         * **卖出纪律**：[🎯 建议卖出] 为止盈位；[🛑 止损价] 跌破必跑。
-        * **运行机制**：程序将自动扫描列表中 **所有** 出现的光头强标的。若行情火爆，首次加载可能稍慢，请耐心等待。
+        * **诊断模式**：如果均线/位置显示“❌”，说明该股票数据获取失败，代码将自动重试“不复权”数据。
         """)
 
         full_result = YangStrategy.filter_stocks(raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio)
@@ -307,12 +336,10 @@ if not raw_df.empty:
             
             for i, (index, row) in enumerate(display_result.iterrows()):
                 
-                # 逻辑修正：只要是光头强，无条件扫描
+                # 只要是光头强，无条件扫描
                 if "光头强" in row['Morphology']:
-                    try:
-                        t_str, p_str = fetch_stock_history_analysis(row['Symbol'], row['Price'])
-                    except:
-                        t_str, p_str = "⚪ 稍后刷新", "⚪ 稍后刷新"
+                    # 这里不再使用 try-except 掩盖错误，而是接收 error_string
+                    t_str, p_str = fetch_stock_history_analysis(row['Symbol'], row['Price'])
                 else:
                     t_str, p_str = "⚪ 非重点", "⚪ 跳过"
                 
@@ -339,8 +366,11 @@ if not raw_df.empty:
                     "Symbol": "代码", "Name": "名称",
                     "Win_Score": st.column_config.ProgressColumn("🔥 胜率分", format="%d", min_value=0, max_value=100),
                     "Morphology": st.column_config.TextColumn("📊 分时/形态", width="medium"),
-                    "Trend_Check": st.column_config.TextColumn("📈 均线(缓存)", help="所有光头强均会自动检测"),
-                    "Pos_Check": st.column_config.TextColumn("⛰️ 位置风险", help="所有光头强均会自动检测"),
+                    
+                    # ⚠️ 关键：列宽加大，以便显示错误信息
+                    "Trend_Check": st.column_config.TextColumn("📈 均线(诊疗)", width="medium"),
+                    "Pos_Check": st.column_config.TextColumn("⛰️ 位置风险", width="medium"),
+                    
                     "Price": st.column_config.NumberColumn("现价", format="¥%.2f"),
                     "Change_Pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
                     "Buy_Price": st.column_config.NumberColumn("建议买入", format="¥%.2f"),
