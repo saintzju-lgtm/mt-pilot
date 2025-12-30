@@ -18,7 +18,7 @@ else:
 
 # --- 2. 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v6.6：全能图表版",
+    page_title="Speculative Capital Catcher v6.6",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -289,7 +289,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- 7. UI 界面 ---
-st.title("🦅 游资捕手 v6.6：全能图表版")
+st.title("🦅 Speculative Capital Catcher v6.6")
 
 with st.sidebar:
     st.header("⚙️ 1. 基础筛选")
