@@ -17,7 +17,7 @@ else:
 
 # --- 2. 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v6.3：实战配置版",
+    page_title="游资捕手 v6.4：逻辑修复版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -27,19 +27,16 @@ st.set_page_config(
 @st.cache_data(ttl=14400, show_spinner=False)
 def fetch_stock_history_analysis(symbol_str, current_price_ref):
     symbol_str = str(symbol_str)
-    # 随机延迟，防封
     time.sleep(random.uniform(1.0, 2.0))
     
     error_log = ""
     hist_df = pd.DataFrame()
 
-    # 通道 A
     try:
         hist_df = ak.stock_zh_a_hist(symbol=symbol_str, period="daily", adjust="qfq")
     except Exception as e:
         error_log = str(e)
     
-    # 通道 B
     if hist_df.empty:
         try:
             time.sleep(1)
@@ -52,7 +49,6 @@ def fetch_stock_history_analysis(symbol_str, current_price_ref):
         return "❌ 接口空", "❌ 接口空"
     
     try:
-        # --- 列名清洗 (解决 '算力错误') ---
         hist_df.columns = [str(c).strip() for c in hist_df.columns]
         
         close_col = None
@@ -71,10 +67,8 @@ def fetch_stock_history_analysis(symbol_str, current_price_ref):
         hist_df['close'] = pd.to_numeric(hist_df['close'], errors='coerce')
         hist_df['low'] = pd.to_numeric(hist_df['low'], errors='coerce')
 
-        # 取最近 30 天
         hist_df = hist_df.tail(30)
         
-        # 1. 均线趋势
         close_prices = hist_df['close']
         ma5 = close_prices.rolling(5).mean().iloc[-1] if len(close_prices) >= 5 else 0
         ma10 = close_prices.rolling(10).mean().iloc[-1] if len(close_prices) >= 10 else 0
@@ -88,7 +82,6 @@ def fetch_stock_history_analysis(symbol_str, current_price_ref):
         elif ma5 > 0 and current_price_ref < ma5:
             trend_str = "📉 破5日线"
         
-        # 2. 位置风险
         lowest_20 = hist_df['low'].tail(20).min()
         if pd.isna(lowest_20) or lowest_20 == 0: lowest_20 = 0.01 
         
@@ -111,12 +104,11 @@ class YangStrategy:
         for i in range(max_retries):
             try:
                 df = ak.stock_zh_a_spot_em()
-                # 重命名：增加流通市值和总市值
                 df = df.rename(columns={
                     '代码': 'Symbol', '名称': 'Name', '最新价': 'Price',
                     '涨跌幅': 'Change_Pct', '换手率': 'Turnover_Rate',
                     '量比': 'Volume_Ratio', '总市值': 'Market_Cap',
-                    '流通市值': 'Circulating_Cap', # 新增字段
+                    '流通市值': 'Circulating_Cap',
                     '最高': 'High', '最低': 'Low', '今开': 'Open',
                     '成交量': 'Volume', '成交额': 'Amount'
                 })
@@ -141,10 +133,7 @@ class YangStrategy:
         df['Stop_Loss'] = df['Price'] * 0.97
         df['Target_Price'] = df['Price'] * 1.08
         
-        # --- 核心新增：流通盘占比计算 ---
-        # 防止分母为0
-        df['Market_Cap'] = df['Market_Cap'].replace(0, 1)
-        df['Circulating_Ratio'] = (df['Circulating_Cap'] / df['Market_Cap']) * 100
+        # 注意：Circulating_Ratio 已经在 filter_stocks 里算过了，这里直接用
         
         def analyze_morphology(row):
             if row['Price'] == 0: return "数据缺失"
@@ -184,7 +173,7 @@ class YangStrategy:
             if "光头强" in row['Morphology']: score += 15
             elif "长上影" in row['Morphology']: score -= 15
             elif "炸板" in row['Morphology']: score -= 30
-            # 流通盘占比加分 (结构好)
+            # 使用已存在的列
             if row['Circulating_Ratio'] > 80: score += 5
             
             if 4.0 <= row['Change_Pct'] <= 8.5: score += 5
@@ -224,17 +213,25 @@ class YangStrategy:
     def filter_stocks(df, max_cap, min_turnover, min_change, max_change, min_vol_ratio, min_circ_ratio):
         if df.empty: return df
         
-        # 单位转换
+        # --- 核心修复：先计算指标，再筛选 ---
+        
+        # 1. 计算市值 (亿)
         df['Market_Cap_Billions'] = df['Market_Cap'] / 100000000
         
+        # 2. 计算流通盘占比 (防止除0错误)
+        df['Market_Cap'] = df['Market_Cap'].replace(0, 1)
+        df['Circulating_Ratio'] = (df['Circulating_Cap'] / df['Market_Cap']) * 100
+        
+        # 3. 执行筛选
         filtered = df[
             (df['Market_Cap_Billions'] <= max_cap) &
             (df['Turnover_Rate'] >= min_turnover) &
             (df['Change_Pct'] >= min_change) & 
             (df['Change_Pct'] <= max_change) &
             (df['Volume_Ratio'] >= min_vol_ratio) &
-            (df['Circulating_Ratio'] >= min_circ_ratio) # 新增筛选
+            (df['Circulating_Ratio'] >= min_circ_ratio) # 此时 Circulating_Ratio 已存在
         ]
+        
         result = YangStrategy.calculate_battle_plan(filtered)
         return result.sort_values(by='Win_Score', ascending=False)
 
@@ -280,7 +277,7 @@ def get_global_engine():
 data_engine = get_global_engine()
 
 # --- 6. UI 界面 ---
-st.title("🦅 游资捕手 v6.3：实战配置版")
+st.title("🦅 游资捕手 v6.4：逻辑修复版")
 
 with st.sidebar:
     st.header("⚙️ 1. 基础筛选")
@@ -290,10 +287,9 @@ with st.sidebar:
     max_change = col2.number_input("涨幅上限", 8.5)
     
     st.markdown("---")
-    st.header("⚖️ 2. 资金/结构 (图片策略)")
+    st.header("⚖️ 2. 资金/结构")
     min_turnover = st.slider("最低换手率 (%)", 1.0, 15.0, 5.0)
     min_vol_ratio = st.number_input("最低量比 (建议>1.0)", 1.5)
-    # 新增核心筛选
     min_circ_ratio = st.slider("最低流通盘占比 (%)", 0, 100, 50, help="筛选流通股占总股本比例。比例过低(<30%)通常意味着有大量限售股，流动性不真实，建议>50%。")
     
     st.markdown("---")
@@ -322,16 +318,15 @@ if not raw_df.empty:
     elif last_error:
         status_placeholder.warning(f"⚡ 网络波动 (使用缓存 {time_str})，系统正在后台重连...")
     else:
-        status_placeholder.success(f"✅ 系统正常 | 更新: {time_str} | 已加载【流通盘占比】过滤")
+        status_placeholder.success(f"✅ 系统正常 | 更新: {time_str} | 计算逻辑已修正")
 
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
     with tab1:
         st.info("""
-        📋 **选股策略优化 (基于最新配置)：**
-        * **结构安全**：已过滤掉流通盘占比 < {}% 的标的 (避开限售股解禁压力大的伪小盘)。
+        📋 **选股策略优化：**
+        * **结构安全**：已过滤掉流通盘占比 < {}% 的标的。
         * **形态优先**：系统会对所有 **[🚀 光头强]** 自动进行均线体检。
-        * **显示优化**：胜率/换手改为数字显示，量比已添加。
         """.format(min_circ_ratio))
 
         full_result = YangStrategy.filter_stocks(raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio, min_circ_ratio)
@@ -368,24 +363,20 @@ if not raw_df.empty:
                     'Pos_Check',       
                     'Price', 'Change_Pct', 
                     'Turnover_Rate', 
-                    'Volume_Ratio',    # 已添加量比
-                    'Circulating_Ratio', # 已添加流通占比
+                    'Volume_Ratio',
+                    'Circulating_Ratio',
                     'Buy_Price', 'Target_Price', 'Stop_Loss'
                 ]],
                 column_config={
                     "Symbol": "代码", "Name": "名称",
-                    # 修改为数字显示，去掉 bar
                     "Win_Score": st.column_config.NumberColumn("🔥 胜率", format="%d分"),
                     "Morphology": st.column_config.TextColumn("📊 形态", width="medium"),
                     "Trend_Check": st.column_config.TextColumn("📈 均线", width="medium"),
                     "Pos_Check": st.column_config.TextColumn("⛰️ 位置", width="small"),
                     "Price": st.column_config.NumberColumn("现价", format="¥%.2f"),
                     "Change_Pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
-                    # 修改为数字显示，去掉 bar
                     "Turnover_Rate": st.column_config.NumberColumn("换手%", format="%.1f%%"),
-                    # 新增量比列
                     "Volume_Ratio": st.column_config.NumberColumn("量比", format="%.1f"),
-                    # 新增流通占比列
                     "Circulating_Ratio": st.column_config.NumberColumn("流/总%", format="%.0f%%", help="流通市值占总市值比例，越大越好"),
                     
                     "Buy_Price": st.column_config.NumberColumn("买入", format="¥%.2f"),
