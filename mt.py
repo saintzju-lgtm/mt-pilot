@@ -5,6 +5,7 @@ import time
 import threading
 import ssl
 import random
+import plotly.graph_objects as go # 引入绘图库
 from datetime import datetime, timedelta, timezone
 
 # --- 1. SSL 补丁 ---
@@ -17,7 +18,7 @@ else:
 
 # --- 2. 页面配置 ---
 st.set_page_config(
-    page_title="游资捕手 v6.4：逻辑修复版",
+    page_title="游资捕手 v6.5：交互看盘版",
     page_icon="🦅",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -27,6 +28,7 @@ st.set_page_config(
 @st.cache_data(ttl=14400, show_spinner=False)
 def fetch_stock_history_analysis(symbol_str, current_price_ref):
     symbol_str = str(symbol_str)
+    # 随机延迟防封
     time.sleep(random.uniform(1.0, 2.0))
     
     error_log = ""
@@ -49,17 +51,14 @@ def fetch_stock_history_analysis(symbol_str, current_price_ref):
         return "❌ 接口空", "❌ 接口空"
     
     try:
+        # 列名清洗
         hist_df.columns = [str(c).strip() for c in hist_df.columns]
-        
         close_col = None
         for col in hist_df.columns:
-            if "收盘" in col or "close" in col.lower() or "latest" in col.lower():
-                close_col = col; break
-        
+            if "收盘" in col or "close" in col.lower(): close_col = col; break
         low_col = None
         for col in hist_df.columns:
-            if "最低" in col or "low" in col.lower():
-                low_col = col; break
+            if "最低" in col or "low" in col.lower(): low_col = col; break
 
         if not close_col: return f"⚠️ 缺列", "⚠️ 格式错误"
 
@@ -67,6 +66,7 @@ def fetch_stock_history_analysis(symbol_str, current_price_ref):
         hist_df['close'] = pd.to_numeric(hist_df['close'], errors='coerce')
         hist_df['low'] = pd.to_numeric(hist_df['low'], errors='coerce')
 
+        # 取最近 30 天
         hist_df = hist_df.tail(30)
         
         close_prices = hist_df['close']
@@ -94,9 +94,33 @@ def fetch_stock_history_analysis(symbol_str, current_price_ref):
         return trend_str, pos_str
 
     except Exception as e:
-        return f"⚠️ 算力:{str(e)[:5]}", f"⚠️ Check"
+        return f"⚠️ 算力错", f"⚠️ Check"
 
-# --- 4. 核心策略逻辑 ---
+# --- 4. K线图数据获取函数 (新功能) ---
+@st.cache_data(ttl=3600)
+def get_kline_data(symbol, name):
+    """获取绘图用的 K 线数据"""
+    try:
+        # 拉取最近 60 天
+        df = ak.stock_zh_a_hist(symbol=str(symbol), period="daily", adjust="qfq").tail(60)
+        df.columns = [str(c).strip() for c in df.columns]
+        
+        # 统一列名
+        rename_map = {}
+        for c in df.columns:
+            if "日期" in c: rename_map[c] = 'Date'
+            elif "开盘" in c: rename_map[c] = 'Open'
+            elif "收盘" in c: rename_map[c] = 'Close'
+            elif "最高" in c: rename_map[c] = 'High'
+            elif "最低" in c: rename_map[c] = 'Low'
+        
+        df = df.rename(columns=rename_map)
+        df['Date'] = pd.to_datetime(df['Date']).dt.strftime('%Y-%m-%d')
+        return df
+    except:
+        return pd.DataFrame()
+
+# --- 5. 核心策略逻辑 ---
 class YangStrategy:
     
     @staticmethod
@@ -132,8 +156,6 @@ class YangStrategy:
         df['Buy_Price'] = df['Price']
         df['Stop_Loss'] = df['Price'] * 0.97
         df['Target_Price'] = df['Price'] * 1.08
-        
-        # 注意：Circulating_Ratio 已经在 filter_stocks 里算过了，这里直接用
         
         def analyze_morphology(row):
             if row['Price'] == 0: return "数据缺失"
@@ -213,29 +235,24 @@ class YangStrategy:
     def filter_stocks(df, max_cap, min_turnover, min_change, max_change, min_vol_ratio, min_circ_ratio):
         if df.empty: return df
         
-        # --- 核心修复：先计算指标，再筛选 ---
-        
-        # 1. 计算市值 (亿)
+        # --- 核心修复：先计算，再筛选 (解决 KeyError) ---
         df['Market_Cap_Billions'] = df['Market_Cap'] / 100000000
-        
-        # 2. 计算流通盘占比 (防止除0错误)
         df['Market_Cap'] = df['Market_Cap'].replace(0, 1)
         df['Circulating_Ratio'] = (df['Circulating_Cap'] / df['Market_Cap']) * 100
         
-        # 3. 执行筛选
         filtered = df[
             (df['Market_Cap_Billions'] <= max_cap) &
             (df['Turnover_Rate'] >= min_turnover) &
             (df['Change_Pct'] >= min_change) & 
             (df['Change_Pct'] <= max_change) &
             (df['Volume_Ratio'] >= min_vol_ratio) &
-            (df['Circulating_Ratio'] >= min_circ_ratio) # 此时 Circulating_Ratio 已存在
+            (df['Circulating_Ratio'] >= min_circ_ratio) 
         ]
         
         result = YangStrategy.calculate_battle_plan(filtered)
         return result.sort_values(by='Win_Score', ascending=False)
 
-# --- 5. 后台数据引擎 ---
+# --- 6. 后台数据引擎 ---
 class BackgroundEngine:
     def __init__(self):
         self.raw_data = pd.DataFrame()
@@ -276,8 +293,8 @@ def get_global_engine():
 
 data_engine = get_global_engine()
 
-# --- 6. UI 界面 ---
-st.title("🦅 游资捕手 v6.4：逻辑修复版")
+# --- 7. UI 界面 ---
+st.title("🦅 游资捕手 v6.5：交互看盘版")
 
 with st.sidebar:
     st.header("⚙️ 1. 基础筛选")
@@ -304,36 +321,32 @@ with st.sidebar:
     if st.checkbox("自动同步 (180s)", value=False):
         time.sleep(180); st.rerun()
 
-# --- 7. 主展示逻辑 ---
+# --- 8. 主展示逻辑 ---
 status_placeholder = st.empty()
 raw_df, last_time, last_error = data_engine.get_data()
 
 if not raw_df.empty:
     time_str = last_time.strftime('%H:%M:%S')
-    now = datetime.now(timezone(timedelta(hours=8)))
-    is_stale = (now - last_time).total_seconds() > 300
     
-    if is_stale and last_error:
-        status_placeholder.error(f"⚠️ 网络堵塞 | 数据停滞于: {time_str} | 错误: {last_error}")
-    elif last_error:
-        status_placeholder.warning(f"⚡ 网络波动 (使用缓存 {time_str})，系统正在后台重连...")
+    if last_error:
+        status_placeholder.warning(f"⚡ 网络波动 (使用缓存 {time_str})，后台重连中...")
     else:
-        status_placeholder.success(f"✅ 系统正常 | 更新: {time_str} | 计算逻辑已修正")
+        status_placeholder.success(f"✅ 系统正常 | 更新: {time_str} | 点击表格行可查看K线")
 
     tab1, tab2 = st.tabs(["🏹 游资狙击池 (买入机会)", "🛡️ 持仓风控雷达 (卖出信号)"])
 
     with tab1:
+        # --- 恢复原版文案 ---
         st.info("""
-        📋 **选股策略优化：**
-        * **结构安全**：已过滤掉流通盘占比 < {}% 的标的。
-        * **形态优先**：系统会对所有 **[🚀 光头强]** 自动进行均线体检。
-        """.format(min_circ_ratio))
+        📋 **杨永兴操盘铁律 (通用剧本)：**
+        1. **买入后**：若当日封死涨停，则持有；若炸板，立即走人。
+        2. **隔日卖出**：明日集合竞价若**不红盘高开**，开盘直接清仓；若高开，则持股待涨至目标价。
+        """)
 
         full_result = YangStrategy.filter_stocks(raw_df, max_cap, min_turnover, min_change, max_change, min_vol_ratio, min_circ_ratio)
         display_result = full_result.head(top_n).copy()
         
         if len(display_result) > 0:
-            st.markdown(f"### 🧬 Top {len(display_result)} 深度扫描...")
             
             trends = []
             positions = []
@@ -354,17 +367,13 @@ if not raw_df.empty:
             display_result['Pos_Check'] = positions
             progress_bar.empty()
             
-            st.dataframe(
+            # --- 新增：交互式表格 ---
+            selection = st.dataframe(
                 display_result[[
                     'Symbol', 'Name', 
-                    'Win_Score', 
-                    'Morphology',      
-                    'Trend_Check',    
-                    'Pos_Check',       
+                    'Win_Score', 'Morphology', 'Trend_Check', 'Pos_Check',       
                     'Price', 'Change_Pct', 
-                    'Turnover_Rate', 
-                    'Volume_Ratio',
-                    'Circulating_Ratio',
+                    'Turnover_Rate', 'Volume_Ratio', 'Circulating_Ratio',
                     'Buy_Price', 'Target_Price', 'Stop_Loss'
                 ]],
                 column_config={
@@ -377,15 +386,51 @@ if not raw_df.empty:
                     "Change_Pct": st.column_config.NumberColumn("涨幅", format="%.2f%%"),
                     "Turnover_Rate": st.column_config.NumberColumn("换手%", format="%.1f%%"),
                     "Volume_Ratio": st.column_config.NumberColumn("量比", format="%.1f"),
-                    "Circulating_Ratio": st.column_config.NumberColumn("流/总%", format="%.0f%%", help="流通市值占总市值比例，越大越好"),
-                    
+                    "Circulating_Ratio": st.column_config.NumberColumn("流/总%", format="%.0f%%"),
                     "Buy_Price": st.column_config.NumberColumn("买入", format="¥%.2f"),
                     "Target_Price": st.column_config.NumberColumn("止盈", format="¥%.2f"),
                     "Stop_Loss": st.column_config.NumberColumn("止损", format="¥%.2f"),
                 },
                 hide_index=True,
-                use_container_width=True
+                use_container_width=True,
+                selection_mode="single-row", # 开启单行选择
+                on_select="rerun"            # 选中后立即刷新页面以显示K线
             )
+            
+            # --- K线图绘制逻辑 ---
+            if selection.selection["rows"]:
+                selected_index = selection.selection["rows"][0]
+                selected_row = display_result.iloc[selected_index]
+                sel_code = selected_row['Symbol']
+                sel_name = selected_row['Name']
+                
+                st.divider()
+                st.subheader(f"📈 {sel_name} ({sel_code}) 日K线分析")
+                
+                chart_df = get_kline_data(sel_code, sel_name)
+                
+                if not chart_df.empty:
+                    # 绘制 Plotly 蜡烛图
+                    fig = go.Figure(data=[go.Candlestick(
+                        x=chart_df['Date'],
+                        open=chart_df['Open'], high=chart_df['High'],
+                        low=chart_df['Low'], close=chart_df['Close'],
+                        increasing_line_color='red', decreasing_line_color='green',
+                        name="K线"
+                    )])
+                    
+                    # 计算绘图用均线
+                    chart_df['MA5'] = chart_df['Close'].rolling(5).mean()
+                    chart_df['MA10'] = chart_df['Close'].rolling(10).mean()
+                    
+                    fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA5'], mode='lines', name='MA5', line=dict(color='orange', width=1)))
+                    fig.add_trace(go.Scatter(x=chart_df['Date'], y=chart_df['MA10'], mode='lines', name='MA10', line=dict(color='blue', width=1)))
+                    
+                    fig.update_layout(xaxis_rangeslider_visible=False, height=400, margin=dict(l=20, r=20, t=30, b=20))
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.warning("⚠️ 暂无法获取该股票 K 线数据")
+
         else:
             st.info("当前无符合标的。")
 
